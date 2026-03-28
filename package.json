@@ -1,6 +1,6 @@
 {
   "name": "marmonitor",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "MJ JO <mjjo16@gmail.com>",
   "description": "tmux status bar monitor for AI coding agents — track Claude Code, Codex, Gemini sessions, tokens, and phases in real time",
   "type": "module",
