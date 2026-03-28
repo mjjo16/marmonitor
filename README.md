@@ -46,10 +46,12 @@ When you run multiple AI coding agents in tmux — Claude Code in one pane, Code
 **Quick jump** — press `Option+1` to jump directly to the #1 attention session's tmux pane. No searching through windows.
 
 **Full status** — `marmonitor status` shows everything:
-- All AI sessions with PID, working directory, CPU, memory
-- Token usage (input, output, cache) and model name
-- Session phase and time since last activity
-- Worker process tree
+
+<p align="center">
+  <img src="docs/use_status_sample.png" alt="marmonitor status output" width="640">
+  <br>
+  <em>All sessions with status, tokens, phase, CPU/MEM, and worker process tree</em>
+</p>
 
 **Zero setup** — no API keys, no agent plugins, no code changes. marmonitor reads local process info and session files from the outside. Install, add one line to tmux.conf, done.
 
