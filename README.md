@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/banner-brown-dots.png" alt="marmonitor" width="480">
+  <img src="docs/banner-ansi.png" alt="marmonitor" width="480">
 </p>
 
 <p align="center">
