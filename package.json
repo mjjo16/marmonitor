@@ -2,7 +2,7 @@
   "name": "marmonitor",
   "version": "0.1.0",
   "author": "MJ JO <mjjo16@gmail.com>",
-  "description": "Local AI coding agent monitor for tmux and terminal workflows",
+  "description": "tmux status bar monitor for AI coding agents — track Claude Code, Codex, Gemini sessions, tokens, and phases in real time",
   "type": "module",
   "os": [
     "darwin",
@@ -21,13 +21,18 @@
   ],
   "keywords": [
     "ai",
+    "ai-agent",
     "monitor",
     "cli",
     "tmux",
+    "statusbar",
     "claude",
+    "claude-code",
     "codex",
+    "gemini",
     "terminal",
-    "shell"
+    "developer-tools",
+    "session-manager"
   ],
   "repository": {
     "type": "git",

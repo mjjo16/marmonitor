@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Standing guard over your AI coding sessions</strong>
+  <strong>tmux status bar monitor for Claude Code, Codex & Gemini — track AI coding sessions in real time</strong>
 </p>
 
 <p align="center">
