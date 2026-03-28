@@ -58,7 +58,7 @@ marmonitor dock          # compact, for tmux panes
 # Jump to a session's tmux pane
 marmonitor jump --attention-index 1
 
-# tmux/WezTerm statusline widget
+# tmux statusline widget
 marmonitor --statusline --statusline-format tmux-badges
 ```
 
@@ -100,9 +100,13 @@ bind -n M-1 run-shell "marmonitor jump --attention-index 1"
 
 See [`examples/tmux/`](examples/tmux/) for full setup.
 
-### WezTerm
+### Non-tmux terminal surfaces
 
-See [`examples/wezterm/`](examples/wezterm/) for bottom bar integration using `marmonitor-status.lua`.
+WezTerm / iTerm2 terminal-native surfaces are currently paused.
+
+- `marmonitor` is `tmux-first`
+- non-tmux bars are not part of the supported default setup right now
+- existing WezTerm example files remain in the repo as paused reference material, not active product surface
 
 ## Configuration
 
@@ -156,6 +160,7 @@ marmonitor settings-init --stdout
 - **Read-only by default** — observes only, never modifies your sessions
 - **No network** — zero outbound connections, all data stays local
 - **Conservative defaults** — all integrations are opt-in
+- **tmux-first** — terminal-native WezTerm/iTerm2 surfaces are currently paused
 
 ## Contributing
 
@@ -164,6 +169,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, commit conventions, and PR gui
 ## Known Limitations
 
 - Pane jump requires tmux
+- WezTerm / iTerm2 native bars are paused for now; tmux is the supported surface
 - Gemini permission detection is limited due to Ink TUI architecture
 - Phase detection relies on heuristics — accuracy varies by agent
 - macOS first; Linux support is untested

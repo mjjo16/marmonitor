@@ -107,14 +107,14 @@ function buildHelpAppendix(): string {
     "  attention     Priority list for sessions that need review",
     "  watch         Live full-screen monitor",
     "  dock          Persistent tmux-friendly monitor",
-    "  --statusline  Status bar output for tmux / WezTerm",
+    "  --statusline  Status bar output for tmux",
     "  clean         Review or kill unmatched leftovers",
     "  debug-phase   Inspect raw phase signals for one PID",
     "  guard         Claude hook evaluator; fail-open on malformed input/errors",
     "  settings-*    Locate, inspect, or initialize settings.json",
     "",
     "Statusline formats:",
-    "  compact | standard | extended | tmux-badges | wezterm-pills",
+    "  compact | standard | extended | tmux-badges",
     "",
     "Config helper commands:",
     "  settings-path           Show config search order and active file",
@@ -124,7 +124,7 @@ function buildHelpAppendix(): string {
     "",
     "Settings groups:",
     "  display       Attention list, statusline density, sorting",
-    "  integration   tmux keys, WezTerm TTL, banner behavior",
+    "  integration   tmux keys, paused terminal integrations, banner behavior",
     "  paths         Runtime data path overrides for Claude/Codex",
     "  status        Thresholds and phase/approval heuristics",
     "  performance   Snapshot/cache TTL tuning",
@@ -322,7 +322,7 @@ function buildAdvancedConfigSample(): string {
           },
         },
         wezterm: {
-          enabled: true,
+          enabled: false,
           statusTtlSec: 15,
         },
         banner: {
@@ -540,7 +540,7 @@ program
   .option("--statusline", "One-line summary for tmux statusbar")
   .option(
     "--statusline-format <format>",
-    "Statusline format: compact | standard | extended | tmux-badges | wezterm-pills",
+    "Statusline format: compact | standard | extended | tmux-badges",
     "compact",
   )
   .option("--width <n>", "Render width hint for responsive statusline compaction")
@@ -554,6 +554,10 @@ program
     if (opts.statusline) {
       try {
         const config = await loadConfig(resolveConfigPath(opts));
+        if (opts.statuslineFormat === "wezterm-pills") {
+          console.error("wezterm-pills is paused. Use tmux-badges or another tmux format.");
+          process.exit(1);
+        }
         const attentionLimit = config.display.statuslineAttentionLimit;
         const width = resolveStatuslineWidth(opts.width);
         const cached = await readCachedStatusline(

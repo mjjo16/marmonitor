@@ -170,7 +170,7 @@ function readInlineBannerImage(): string | undefined {
 }
 
 export function supportsInlineBannerImage(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.TERM_PROGRAM === "iTerm.app" || Boolean(env.WEZTERM_PANE || env.WEZTERM_EXECUTABLE);
+  return env.MARMONITOR_ENABLE_INLINE_IMAGE === "1";
 }
 
 function renderWeztermInlineImage(width: string, assetPath: string): string | undefined {
@@ -195,6 +195,8 @@ function renderBestEffortImage(
   assetPath: string,
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
+  if (!supportsInlineBannerImage(env)) return undefined;
+
   if (env.WEZTERM_PANE || env.WEZTERM_EXECUTABLE || env.TERM_PROGRAM === "WezTerm") {
     return renderWeztermInlineImage(width, assetPath);
   }

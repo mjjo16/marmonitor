@@ -37,7 +37,7 @@ describe("config CLI helpers", () => {
   it("prints the advanced config sample to stdout", () => {
     const output = runCli(["settings-init", "--advanced", "--stdout"]);
     const parsed = JSON.parse(output);
-    assert.equal(parsed.integration.wezterm.enabled, true);
+    assert.equal(parsed.integration.wezterm.enabled, false);
     assert.equal(parsed.integration.banner.install, true);
     assert.ok(Array.isArray(parsed.paths.claudeProjects));
   });

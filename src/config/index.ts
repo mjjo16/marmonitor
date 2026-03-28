@@ -153,7 +153,7 @@ const DEFAULTS: MarmonitorConfig = {
       },
     },
     wezterm: {
-      enabled: true,
+      enabled: false,
       statusTtlSec: 15,
     },
     banner: {

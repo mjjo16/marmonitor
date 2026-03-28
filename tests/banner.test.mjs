@@ -9,9 +9,10 @@ import {
 } from "../dist/banner/index.js";
 
 describe("supportsInlineBannerImage", () => {
-  it("supports iTerm2 only in the current implementation", () => {
-    assert.equal(supportsInlineBannerImage({ TERM_PROGRAM: "iTerm.app" }), true);
+  it("keeps inline image disabled by default", () => {
+    assert.equal(supportsInlineBannerImage({ TERM_PROGRAM: "iTerm.app" }), false);
     assert.equal(supportsInlineBannerImage({ TERM_PROGRAM: "WezTerm" }), false);
+    assert.equal(supportsInlineBannerImage({ MARMONITOR_ENABLE_INLINE_IMAGE: "1" }), true);
   });
 });
 

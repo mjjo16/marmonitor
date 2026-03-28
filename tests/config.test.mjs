@@ -47,7 +47,7 @@ describe("getDefaults", () => {
     assert.equal(config.integration.tmux.keys.jumpPopup, "j");
     assert.equal(config.integration.tmux.keys.dockToggle, "m");
     assert.deepEqual(config.integration.tmux.keys.directJump, ["M-1", "M-2", "M-3", "M-4", "M-5"]);
-    assert.equal(config.integration.wezterm.enabled, true);
+    assert.equal(config.integration.wezterm.enabled, false);
     assert.equal(config.integration.wezterm.statusTtlSec, 15);
     assert.equal(config.integration.banner.install, true);
     assert.equal(config.integration.banner.runtime, false);
@@ -159,6 +159,7 @@ describe("loadConfig", () => {
       assert.equal(config.display.statuslineAttentionLimit, 4);
       assert.equal(config.intervention.enabled, false);
       assert.equal(config.integration.tmux.keys.attentionPopup, "a");
+      assert.equal(config.integration.wezterm.enabled, false);
       assert.equal(config.integration.wezterm.statusTtlSec, 15);
       assert.equal(config.integration.banner.install, true);
       assert.deepEqual(config.paths.extraRoots, []);

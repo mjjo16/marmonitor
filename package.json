@@ -27,7 +27,7 @@
     "claude",
     "codex",
     "terminal",
-    "wezterm"
+    "shell"
   ],
   "repository": {
     "type": "git",
