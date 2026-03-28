@@ -19,7 +19,7 @@ describe("supportsInlineBannerImage", () => {
 describe("renderInstallInfo", () => {
   it("includes quick start commands and docs link", () => {
     const text = renderInstallInfo();
-    assert.match(text, /marmonitor v0\.1\.0/);
+    assert.match(text, /marmonitor v\d+\.\d+\.\d+/);
     assert.match(text, /marmonitor status/);
     assert.match(text, /marmonitor dock/);
     assert.match(text, /github\.com\/mjjo16\/marmonitor/);
