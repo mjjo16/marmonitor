@@ -1,0 +1,66 @@
+{
+  "name": "marmonitor",
+  "version": "0.1.0",
+  "author": "MJ JO <mjjo16@gmail.com>",
+  "description": "Local AI coding agent monitor for tmux and terminal workflows",
+  "type": "module",
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "bin": {
+    "marmonitor": "./bin/marmonitor.js"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "docs/banner-combined.png",
+    "docs/banner-brown-dots.png",
+    "docs/banner-brown-dots-small.png",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "ai",
+    "monitor",
+    "cli",
+    "tmux",
+    "claude",
+    "codex",
+    "terminal",
+    "wezterm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mjjo16/marmonitor.git"
+  },
+  "homepage": "https://github.com/mjjo16/marmonitor#readme",
+  "bugs": {
+    "url": "https://github.com/mjjo16/marmonitor/issues"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node bin/marmonitor.js",
+    "lint": "biome check src tests",
+    "test": "node --test tests/*.test.mjs",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {
+    "chalk": "^5.3",
+    "commander": "^12.1",
+    "pidusage": "^3.0",
+    "ps-list": "^8.1",
+    "systeminformation": "^5.22"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^20.14",
+    "@types/pidusage": "^2.0.5",
+    "typescript": "^5.5"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

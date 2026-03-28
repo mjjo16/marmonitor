@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Environment / secrets
+.env
+.env.*
+*.key
+*.pem
+
+# npm
+*.tgz
+npm-debug.log*
+
+# Temporary
+/tmp/
+*.tmp
+
+# Test coverage
+coverage/

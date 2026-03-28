@@ -1,0 +1,982 @@
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { createInterface } from "node:readline/promises";
+import { Command } from "commander";
+import { renderInstallBanner, renderRuntimeBanner } from "./banner/index.js";
+import {
+  getConfigDir,
+  getConfigSearchPaths,
+  getDefaultConfigPath,
+  loadConfig,
+  resolveConfigPath as resolveLoadedConfigPath,
+} from "./config/index.js";
+import { evaluateGuard, formatGuardOutput, parseHookEvent, readStdin } from "./guard/index.js";
+import {
+  printAttention,
+  printAttentionJson,
+  printCleanJson,
+  printCleanPlan,
+  printDock,
+  printJumpAttentionChooser,
+  printJumpJson,
+  printJumpResult,
+  printStatus,
+  printStatusJson,
+  printStatusline,
+  renderStatusline,
+  renderUnavailableStatusline,
+} from "./output/index.js";
+import { selectJumpAttentionItem, selectUnmatchedTargets } from "./output/utils.js";
+import { TERMINAL_RESTORE_SEQUENCE, formatProcessFailure } from "./process-safety.js";
+import { detectClaudePhase } from "./scanner/claude.js";
+import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./scanner/codex.js";
+import { parseGeminiSession } from "./scanner/gemini.js";
+import { scanAgents } from "./scanner/index.js";
+import { detectCliStdoutPhase } from "./scanner/status.js";
+import { captureTmuxPaneOutput, jumpToAgent, resolveTmuxJumpTarget } from "./tmux/index.js";
+import type { AgentSession } from "./types.js";
+import { VERSION } from "./version.js";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+let stdinRawModeActive = false;
+let processExiting = false;
+
+function setStdinRawMode(enabled: boolean): void {
+  const stdin = process.stdin;
+  if (!("setRawMode" in stdin) || typeof stdin.setRawMode !== "function") return;
+  stdin.setRawMode(enabled);
+  stdinRawModeActive = enabled;
+}
+
+function restoreTerminalState(): void {
+  if (stdinRawModeActive) {
+    try {
+      setStdinRawMode(false);
+    } catch {
+      // best effort only
+    }
+  }
+
+  try {
+    process.stdin.pause();
+  } catch {
+    // best effort only
+  }
+
+  if (process.stdout.isTTY) {
+    process.stdout.write(TERMINAL_RESTORE_SEQUENCE);
+  }
+}
+
+function exitWithCleanup(code: number, message?: string): never {
+  if (processExiting) {
+    process.exit(code);
+  }
+
+  processExiting = true;
+  restoreTerminalState();
+
+  if (message) {
+    console.error(message);
+  }
+
+  process.exit(code);
+}
+
+function installProcessSafetyHandlers(): void {
+  process.on("uncaughtException", (error) => {
+    exitWithCleanup(1, formatProcessFailure(error));
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    exitWithCleanup(1, formatProcessFailure(reason));
+  });
+
+  process.on("SIGINT", () => exitWithCleanup(0));
+  process.on("SIGTERM", () => exitWithCleanup(0));
+}
+
+function buildHelpAppendix(): string {
+  return [
+    "Core workflows:",
+    "  status        Full one-shot inventory of local AI sessions",
+    "  attention     Priority list for sessions that need review",
+    "  watch         Live full-screen monitor",
+    "  dock          Persistent tmux-friendly monitor",
+    "  --statusline  Status bar output for tmux / WezTerm",
+    "  clean         Review or kill unmatched leftovers",
+    "  debug-phase   Inspect raw phase signals for one PID",
+    "  guard         Claude hook evaluator; fail-open on malformed input/errors",
+    "  settings-*    Locate, inspect, or initialize settings.json",
+    "",
+    "Statusline formats:",
+    "  compact | standard | extended | tmux-badges | wezterm-pills",
+    "",
+    "Config helper commands:",
+    "  settings-path           Show config search order and active file",
+    "  settings-show           Print the merged runtime config",
+    "  settings-init           Write a starter settings.json",
+    "  settings-init --advanced  Print or write the full advanced sample",
+    "",
+    "Settings groups:",
+    "  display       Attention list, statusline density, sorting",
+    "  integration   tmux keys, WezTerm TTL, banner behavior",
+    "  paths         Runtime data path overrides for Claude/Codex",
+    "  status        Thresholds and phase/approval heuristics",
+    "  performance   Snapshot/cache TTL tuning",
+    "  intervention  Guard and policy rules (advanced / optional)",
+    "",
+    "Default tmux shortcuts:",
+    "  Prefix+a      Attention popup",
+    "  Prefix+j      Jump popup",
+    "  Prefix+m      Toggle dock",
+    "  Option+1..5   Direct jump to numbered attention sessions",
+    "",
+    `Config location: ${getConfigDir()}/settings.json`,
+    "Common settings:",
+    "  display.attentionLimit / display.statuslineAttentionLimit",
+    "  integration.tmux.keys.*",
+    "  paths.* (runtime data path overrides)",
+    "",
+    "Shortcuts can be customized in settings.json:",
+    "  integration.tmux.keys = { attentionPopup, jumpPopup, dockToggle, directJump[] }",
+  ].join("\n");
+}
+
+function clearScreen(): void {
+  if (process.stdout.isTTY) {
+    process.stdout.write("\x1Bc");
+  }
+}
+
+async function promptSelectionKey(maxChoice: number): Promise<number | undefined> {
+  if (!process.stdin.isTTY || maxChoice < 1) return undefined;
+
+  const prompt =
+    maxChoice >= 10
+      ? "\nPress 1-9 to jump, 0 for item 10, q to cancel: "
+      : `\nPress 1-${maxChoice} to jump, q to cancel: `;
+  process.stdout.write(prompt);
+
+  return await new Promise<number | undefined>((resolve) => {
+    const stdin = process.stdin;
+    const restoreRawMode = "setRawMode" in stdin && typeof stdin.setRawMode === "function";
+
+    const cleanup = (): void => {
+      if (restoreRawMode) setStdinRawMode(false);
+      stdin.pause();
+      stdin.removeListener("data", onData);
+      process.stdout.write("\n");
+    };
+
+    const onData = (chunk: Buffer): void => {
+      const input = chunk.toString("utf8");
+      if (input === "\u0003") {
+        cleanup();
+        exitWithCleanup(130);
+      }
+      if (input === "\u001b" || input === "q" || input === "Q") {
+        cleanup();
+        resolve(undefined);
+        return;
+      }
+
+      const trimmed = input.trim();
+      if (/^[1-9]$/.test(trimmed)) {
+        const selection = Number.parseInt(trimmed, 10);
+        if (selection <= maxChoice) {
+          cleanup();
+          resolve(selection);
+        }
+        return;
+      }
+      if (trimmed === "0" && maxChoice >= 10) {
+        cleanup();
+        resolve(10);
+      }
+    };
+
+    if (restoreRawMode) setStdinRawMode(true);
+    stdin.resume();
+    stdin.on("data", onData);
+  });
+}
+
+const program = new Command();
+
+program
+  .name("marmonitor")
+  .description("AI agent monitoring tool")
+  .version(VERSION, "-v, --version", "output the version number");
+program.helpCommand(false);
+program.showHelpAfterError();
+program.addHelpText("beforeAll", `${renderInstallBanner()}\n`);
+program.addHelpText("afterAll", `\n${buildHelpAppendix()}\n`);
+
+program
+  .command("help [command]")
+  .description("Show marmonitor help, commands, and shortcuts")
+  .action((commandName?: string) => {
+    if (!commandName) {
+      program.outputHelp();
+      return;
+    }
+
+    const target = program.commands.find((command) => command.name() === commandName);
+    if (!target) {
+      console.error(`Unknown command: ${commandName}`);
+      process.exit(1);
+    }
+
+    target.outputHelp();
+  });
+
+program
+  .command("banner")
+  .description("Preview install or runtime banner")
+  .option("--install", "Render install-style banner")
+  .option("--runtime", "Render runtime-style banner")
+  .option("--active <n>", "Active session count for runtime banner")
+  .action(async (opts) => {
+    const active = typeof opts.active === "string" ? Number.parseInt(opts.active, 10) : undefined;
+    if (opts.install && opts.runtime) {
+      console.error("Use only one of --install or --runtime.");
+      process.exit(1);
+    }
+    if (opts.install) {
+      console.log(renderInstallBanner());
+      return;
+    }
+    console.log(renderRuntimeBanner(Number.isNaN(active) ? undefined : active));
+  });
+
+function resolveConfigPath(opts: { config?: string }): string | undefined {
+  return opts.config ?? program.opts<{ config?: string }>().config;
+}
+
+function resolveStatuslineWidth(value: string | undefined): number | undefined {
+  if (value !== undefined) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  }
+
+  return process.stdout.isTTY && typeof process.stdout.columns === "number"
+    ? process.stdout.columns
+    : undefined;
+}
+
+function buildMinimalConfigSample(): string {
+  return JSON.stringify(
+    {
+      display: {
+        attentionLimit: 10,
+        statuslineAttentionLimit: 5,
+      },
+      integration: {
+        tmux: {
+          keys: {
+            attentionPopup: "a",
+            jumpPopup: "j",
+            dockToggle: "m",
+            directJump: ["M-1", "M-2", "M-3", "M-4", "M-5"],
+          },
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+function buildAdvancedConfigSample(): string {
+  return JSON.stringify(
+    {
+      status: {
+        stalledAfterMin: 20,
+        phaseDecay: {
+          thinking: 20,
+          tool: 30,
+          permission: 0,
+          done: 5,
+        },
+        stdoutHeuristic: {
+          approvalPatterns: ["would you like to", "please approve"],
+          clearPatterns: ["applying patch", "running tests"],
+        },
+      },
+      display: {
+        attentionLimit: 10,
+        statuslineAttentionLimit: 5,
+      },
+      integration: {
+        tmux: {
+          keys: {
+            attentionPopup: "a",
+            jumpPopup: "j",
+            dockToggle: "m",
+            directJump: ["M-1", "M-2", "M-3", "M-4", "M-5"],
+          },
+        },
+        wezterm: {
+          enabled: true,
+          statusTtlSec: 15,
+        },
+        banner: {
+          install: true,
+          runtime: false,
+        },
+      },
+      paths: {
+        claudeProjects: [],
+        claudeSessions: [],
+        codexSessions: [],
+        extraRoots: [],
+      },
+      performance: {
+        snapshotTtlMs: 5000,
+        statuslineTtlMs: 5000,
+        stdoutHeuristicTtlMs: 5000,
+      },
+    },
+    null,
+    2,
+  );
+}
+
+program
+  .command("settings-path")
+  .description("Show config search paths and the currently resolved config file")
+  .option("--json", "Output as JSON")
+  .option("--config <path>", "Path to settings.json")
+  .action((opts) => {
+    const customPath = resolveConfigPath(opts);
+    const resolvedPath = resolveLoadedConfigPath(customPath);
+    const payload = {
+      configDir: getConfigDir(),
+      defaultPath: getDefaultConfigPath(),
+      searchPaths: customPath ? [customPath] : getConfigSearchPaths(),
+      resolvedPath: resolvedPath ?? null,
+      source: customPath ? "custom" : resolvedPath ? "discovered" : "default",
+    };
+
+    if (opts.json) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+
+    console.log(`Config dir: ${payload.configDir}`);
+    console.log(`Default path: ${payload.defaultPath}`);
+    console.log(`Resolved path: ${payload.resolvedPath ?? "(none, defaults only)"}`);
+    console.log("Search paths:");
+    for (const path of payload.searchPaths) {
+      console.log(`  - ${path}`);
+    }
+  });
+
+program
+  .command("settings-show")
+  .description("Show the merged runtime configuration")
+  .option("--json", "Output as JSON")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const customPath = resolveConfigPath(opts);
+    const resolvedPath = resolveLoadedConfigPath(customPath);
+    const config = await loadConfig(customPath);
+    const payload = {
+      resolvedPath: resolvedPath ?? null,
+      config,
+    };
+
+    if (opts.json) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+
+    console.log(`Resolved path: ${payload.resolvedPath ?? "(none, defaults only)"}`);
+    console.log(JSON.stringify(config, null, 2));
+  });
+
+program
+  .command("settings-init")
+  .description("Write a starter settings.json file")
+  .option("--advanced", "Write the advanced sample instead of the minimal sample")
+  .option("--stdout", "Print the sample to stdout instead of writing a file")
+  .option("--force", "Overwrite an existing settings file")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const targetPath = resolveConfigPath(opts) ?? getDefaultConfigPath();
+    const sample = opts.advanced ? buildAdvancedConfigSample() : buildMinimalConfigSample();
+
+    if (opts.stdout) {
+      console.log(sample);
+      return;
+    }
+
+    try {
+      await stat(targetPath);
+      if (!opts.force) {
+        console.error(`Config already exists: ${targetPath}`);
+        console.error("Use --force to overwrite or --stdout to preview the sample.");
+        process.exit(1);
+      }
+    } catch {
+      // target does not exist, continue
+    }
+
+    await mkdir(dirname(targetPath), { recursive: true });
+    await writeFile(targetPath, `${sample}\n`, "utf-8");
+    console.log(`Wrote ${opts.advanced ? "advanced" : "minimal"} config to ${targetPath}`);
+  });
+
+function resolveAttentionLimit(
+  opts: { limit?: string },
+  configuredLimit: number,
+  interactive = false,
+): number {
+  const raw = Number(opts.limit);
+  const fallback = Number.isFinite(raw) && raw > 0 ? raw : configuredLimit;
+  if (!interactive) return Math.max(Math.floor(fallback), 1);
+  return Math.min(Math.max(Math.floor(fallback), 1), 10);
+}
+
+function statuslineCacheFile(format: string, attentionLimit: number, width?: number): string {
+  const widthKey = width && width > 0 ? String(width) : "auto";
+  return join(tmpdir(), "marmonitor", `statusline-${format}-${attentionLimit}-${widthKey}.txt`);
+}
+
+function snapshotCacheFile(enrichmentMode: "full" | "light", showDead: boolean): string {
+  return join(
+    tmpdir(),
+    "marmonitor",
+    `snapshot-${enrichmentMode}-${showDead ? "dead" : "alive"}.json`,
+  );
+}
+
+async function readCachedStatusline(
+  format: string,
+  attentionLimit: number,
+  width: number | undefined,
+  ttlMs: number,
+): Promise<string | undefined> {
+  const path = statuslineCacheFile(format, attentionLimit, width);
+  try {
+    const fileStat = await stat(path);
+    if (Date.now() - fileStat.mtimeMs > ttlMs) return undefined;
+    return (await readFile(path, "utf-8")).trimEnd();
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeCachedStatusline(
+  format: string,
+  attentionLimit: number,
+  width: number | undefined,
+  value: string,
+): Promise<void> {
+  const path = statuslineCacheFile(format, attentionLimit, width);
+  try {
+    await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
+    await writeFile(path, value, "utf-8");
+  } catch {
+    // cache failures must never break statusline rendering
+  }
+}
+
+async function readCachedSnapshot(
+  enrichmentMode: "full" | "light",
+  showDead: boolean,
+  ttlMs: number,
+): Promise<AgentSession[] | undefined> {
+  const path = snapshotCacheFile(enrichmentMode, showDead);
+  try {
+    const fileStat = await stat(path);
+    if (Date.now() - fileStat.mtimeMs > ttlMs) return undefined;
+    return JSON.parse(await readFile(path, "utf-8")) as AgentSession[];
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeCachedSnapshot(
+  enrichmentMode: "full" | "light",
+  showDead: boolean,
+  agents: AgentSession[],
+): Promise<void> {
+  const path = snapshotCacheFile(enrichmentMode, showDead);
+  try {
+    await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
+    await writeFile(path, JSON.stringify(agents), "utf-8");
+  } catch {
+    // snapshot cache failures must never break command execution
+  }
+}
+
+async function getAgentsSnapshot(
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  options: { enrichmentMode?: "full" | "light"; ttlMs?: number } = {},
+): Promise<AgentSession[]> {
+  const enrichmentMode = options.enrichmentMode ?? "full";
+  const ttlMs = options.ttlMs ?? config.performance.snapshotTtlMs;
+  const useCache = ttlMs > 0;
+
+  if (useCache) {
+    const cached = await readCachedSnapshot(enrichmentMode, config.display.showDead, ttlMs);
+    if (cached) return cached;
+  }
+
+  const agents = await scanAgents(config, { enrichmentMode });
+  if (useCache) {
+    await writeCachedSnapshot(enrichmentMode, config.display.showDead, agents);
+  }
+  return agents;
+}
+
+program
+  .option("--statusline", "One-line summary for tmux statusbar")
+  .option(
+    "--statusline-format <format>",
+    "Statusline format: compact | standard | extended | tmux-badges | wezterm-pills",
+    "compact",
+  )
+  .option("--width <n>", "Render width hint for responsive statusline compaction")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const validFormats = ["compact", "standard", "extended", "tmux-badges", "wezterm-pills"];
+    if (opts.statuslineFormat && !validFormats.includes(opts.statuslineFormat)) {
+      console.error(`Invalid format: ${opts.statuslineFormat}. Valid: ${validFormats.join(", ")}`);
+      process.exit(1);
+    }
+    if (opts.statusline) {
+      try {
+        const config = await loadConfig(resolveConfigPath(opts));
+        const attentionLimit = config.display.statuslineAttentionLimit;
+        const width = resolveStatuslineWidth(opts.width);
+        const cached = await readCachedStatusline(
+          opts.statuslineFormat,
+          attentionLimit,
+          width,
+          config.performance.statuslineTtlMs,
+        );
+        if (cached) {
+          console.log(cached);
+          return;
+        }
+        const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
+        const rendered = await renderStatusline(
+          agents,
+          opts.statuslineFormat,
+          attentionLimit,
+          width,
+        );
+        await writeCachedStatusline(opts.statuslineFormat, attentionLimit, width, rendered);
+        console.log(rendered);
+        return;
+      } catch {
+        console.log(renderUnavailableStatusline(opts.statuslineFormat));
+        return;
+      }
+    }
+    console.log("TUI dashboard not yet implemented. Use 'marmonitor status' for now.");
+  });
+
+program
+  .command("status")
+  .description("Show current AI agent status")
+  .option("--json", "Output as JSON")
+  .option("--config <path>", "Path to settings.json")
+  .option("--show-dead", "Include dead sessions")
+  .action(async (opts) => {
+    const config = await loadConfig(resolveConfigPath(opts));
+    if (opts.showDead) config.display.showDead = true;
+    const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
+    if (opts.json) {
+      await printStatusJson(agents);
+    } else {
+      await printStatus(agents);
+    }
+  });
+
+program
+  .command("attention")
+  .description("Show prioritized sessions that need attention")
+  .option("--json", "Output as JSON")
+  .option("--interactive", "Choose an attention item and jump to its tmux pane")
+  .option("--limit <n>", "Max items to show", "12")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const config = await loadConfig(resolveConfigPath(opts));
+    const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
+    const limit = resolveAttentionLimit(opts, config.display.attentionLimit);
+    const interactiveLimit = resolveAttentionLimit(opts, config.display.attentionLimit, true);
+    if (opts.interactive && opts.json) {
+      console.error("--interactive cannot be combined with --json.");
+      process.exit(1);
+    }
+    if (opts.interactive) {
+      if (!process.stdin.isTTY) {
+        console.error("--interactive requires an interactive terminal.");
+        process.exit(1);
+      }
+      printJumpAttentionChooser(agents, interactiveLimit);
+      const selection = await promptSelectionKey(interactiveLimit);
+      if (selection === undefined) return;
+      const item = selectJumpAttentionItem(agents, selection);
+      if (!item) {
+        console.error(`Invalid selection: ${selection}`);
+        process.exit(1);
+      }
+      const agent = agents.find((candidate) => candidate.pid === item.pid);
+      if (!agent) {
+        console.error(`AI session not found for pid ${item.pid}.`);
+        process.exit(1);
+      }
+      const result = await jumpToAgent(agent);
+      printJumpResult(result);
+      if (!result.found) process.exit(1);
+      return;
+    }
+    if (opts.json) {
+      printAttentionJson(agents, limit);
+    } else {
+      printAttention(agents, limit);
+    }
+  });
+
+program
+  .command("guard")
+  .description("Evaluate Claude hook payload and return allow/block decision")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    try {
+      const config = await loadConfig(resolveConfigPath(opts));
+      const input = await readStdin();
+      const event = parseHookEvent(input);
+      if (!event) {
+        console.log(JSON.stringify({ decision: "allow" }));
+        return;
+      }
+      const result = evaluateGuard(config, event);
+      console.log(formatGuardOutput(result));
+    } catch {
+      console.log(JSON.stringify({ decision: "allow" }));
+    }
+  });
+
+program
+  .command("debug-phase")
+  .description("Inspect phase signals, stdout heuristic, and tmux capture for one AI session")
+  .requiredOption("--pid <pid>", "AI process PID")
+  .option("--lines <n>", "Number of tmux pane lines to capture", "40")
+  .option("--json", "Output as JSON")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const pid = Number.parseInt(opts.pid, 10);
+
+    if (Number.isNaN(pid)) {
+      console.error(`Invalid pid: ${opts.pid}`);
+      process.exit(1);
+    }
+
+    const lines = Math.max(Number.parseInt(opts.lines, 10) || 40, 10);
+    const config = await loadConfig(resolveConfigPath(opts));
+
+    let agents: AgentSession[];
+    try {
+      agents = await scanAgents(config, { enrichmentMode: "full" });
+    } catch (error) {
+      const payload = {
+        found: false,
+        pid,
+        error: formatProcessFailure(error),
+      };
+      if (opts.json) {
+        console.log(JSON.stringify(payload, null, 2));
+      } else {
+        console.error(payload.error);
+      }
+      process.exit(1);
+    }
+
+    const agent = agents.find((item) => item.pid === pid);
+    if (!agent) {
+      const payload = { found: false, pid };
+      if (opts.json) {
+        console.log(JSON.stringify(payload, null, 2));
+      } else {
+        console.log(`AI session not found for pid ${pid}.`);
+      }
+      process.exit(1);
+    }
+
+    const tmuxTarget = await resolveTmuxJumpTarget(agent);
+    const paneOutput = tmuxTarget ? await captureTmuxPaneOutput(tmuxTarget, lines) : undefined;
+    const stdoutPhase =
+      agent.runtimeSource === "cli" ? await detectCliStdoutPhase(agent, config) : undefined;
+
+    let sessionPhase: string | undefined;
+    let sessionSourceFile: string | undefined;
+    let sessionLastActivityAt: number | undefined;
+    let sessionLastResponseAt: number | undefined;
+
+    if (agent.agentName === "Gemini") {
+      const gemini = await parseGeminiSession(agent.cwd);
+      sessionPhase = gemini.phase;
+      sessionSourceFile = gemini.sessionFile;
+      sessionLastActivityAt = gemini.lastActivityAt;
+      sessionLastResponseAt = gemini.lastResponseAt;
+    } else if (agent.agentName === "Codex") {
+      const codexSessions = await indexCodexSessions(config);
+      const matched = matchCodexSession(agent.cwd, agent.startedAt, codexSessions);
+      sessionPhase = await detectCodexPhase(matched?.filePath, config);
+      sessionSourceFile = matched?.filePath;
+    } else if (agent.agentName === "Claude Code" && agent.sessionId) {
+      const phaseResult = await detectClaudePhase(
+        agent.sessionId,
+        agent.cwd,
+        agent.startedAt,
+        config,
+      );
+      sessionPhase = phaseResult.phase;
+      sessionLastActivityAt = phaseResult.lastActivityAt;
+      sessionLastResponseAt = phaseResult.lastResponseAt;
+    }
+
+    const payload = {
+      found: true,
+      pid: agent.pid,
+      agent: agent.agentName,
+      cwd: agent.cwd,
+      runtimeSource: agent.runtimeSource,
+      status: agent.status,
+      finalPhase: agent.phase ?? null,
+      finalLastActivityAt: agent.lastActivityAt ?? null,
+      finalLastResponseAt: agent.lastResponseAt ?? null,
+      sessionPhase: sessionPhase ?? null,
+      sessionSourceFile: sessionSourceFile ?? null,
+      sessionLastActivityAt: sessionLastActivityAt ?? null,
+      sessionLastResponseAt: sessionLastResponseAt ?? null,
+      stdoutPhase: stdoutPhase ?? null,
+      tmuxTarget: tmuxTarget
+        ? {
+            pane: tmuxTarget.pane.target,
+            match: tmuxTarget.match,
+          }
+        : null,
+      paneOutput: paneOutput?.trimEnd() ?? null,
+    };
+
+    if (opts.json) {
+      console.log(JSON.stringify(payload, null, 2));
+      return;
+    }
+
+    console.log(`PID: ${payload.pid}`);
+    console.log(`Agent: ${payload.agent}`);
+    console.log(`CWD: ${payload.cwd}`);
+    console.log(`Runtime: ${payload.runtimeSource ?? "unknown"}`);
+    console.log(`Status: ${payload.status}`);
+    console.log(`Final phase: ${payload.finalPhase ?? "(none)"}`);
+    console.log(`Session phase: ${payload.sessionPhase ?? "(none)"}`);
+    console.log(`Stdout phase: ${payload.stdoutPhase ?? "(none)"}`);
+    console.log(`Session file: ${payload.sessionSourceFile ?? "(none)"}`);
+    console.log(
+      `tmux target: ${payload.tmuxTarget ? `${payload.tmuxTarget.pane} (${payload.tmuxTarget.match})` : "(none)"}`,
+    );
+    console.log("Pane capture:");
+    console.log(payload.paneOutput ?? "(none)");
+  });
+
+program
+  .command("jump")
+  .description("Jump to the tmux pane running a specific AI session")
+  .option("--pid <pid>", "AI process PID")
+  .option("--attention", "Choose from attention items interactively")
+  .option("--attention-index <n>", "Jump to Nth jumpable attention item")
+  .option("--json", "Output as JSON")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const config = await loadConfig(resolveConfigPath(opts));
+    const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
+    const useAttention = Boolean(opts.attention);
+    const useAttentionIndex = typeof opts.attentionIndex === "string";
+    const usePid = typeof opts.pid === "string";
+
+    const selectedModes = [useAttention, useAttentionIndex, usePid].filter(Boolean).length;
+    if (selectedModes !== 1) {
+      console.error("Use exactly one of --pid <pid>, --attention, or --attention-index <n>.");
+      process.exit(1);
+    }
+
+    let pid: number;
+    if (useAttention) {
+      if (!process.stdin.isTTY) {
+        console.error("--attention requires an interactive terminal.");
+        process.exit(1);
+      }
+      const limit = resolveAttentionLimit(
+        { limit: undefined },
+        config.display.attentionLimit,
+        true,
+      );
+      printJumpAttentionChooser(agents, limit);
+      const selection = await promptSelectionKey(limit);
+      if (selection === undefined) return;
+      const item = selectJumpAttentionItem(agents, selection);
+      if (!item) {
+        console.error(`Invalid selection: ${selection}`);
+        process.exit(1);
+      }
+      pid = item.pid;
+    } else if (useAttentionIndex) {
+      const selection = Number.parseInt(opts.attentionIndex, 10);
+      if (Number.isNaN(selection) || selection < 1) {
+        console.error(`Invalid attention index: ${opts.attentionIndex}`);
+        process.exit(1);
+      }
+      const item = selectJumpAttentionItem(agents, selection);
+      if (!item) {
+        console.error(`No jumpable attention item at index ${selection}.`);
+        process.exit(1);
+      }
+      pid = item.pid;
+    } else {
+      pid = Number.parseInt(opts.pid, 10);
+      if (Number.isNaN(pid)) {
+        console.error(`Invalid pid: ${opts.pid}`);
+        process.exit(1);
+      }
+    }
+
+    const agent = agents.find((item) => item.pid === pid);
+    if (!agent) {
+      const result = {
+        found: false,
+        executed: false,
+        insideTmux: Boolean(process.env.TMUX),
+        pid,
+        message: `AI session not found for pid ${pid}.`,
+      };
+      if (opts.json) {
+        printJumpJson(result);
+      } else {
+        printJumpResult(result);
+      }
+      process.exit(1);
+    }
+
+    const result = await jumpToAgent(agent);
+    if (opts.json) {
+      printJumpJson(result);
+    } else {
+      printJumpResult(result);
+    }
+    if (!result.found) process.exit(1);
+  });
+
+program
+  .command("dock")
+  .description("Compact persistent monitor for tmux pane")
+  .option("--interval <sec>", "Refresh interval in seconds", "5")
+  .option("--detail-interval <sec>", "Heavy enrichment interval", "30")
+  .option("--lines <n>", "Max display lines", "12")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const intervalMs = Math.max(Number(opts.interval) || 5, 2) * 1000;
+    const detailMs = Math.max(Number(opts.detailInterval) || 30, 5) * 1000;
+    const maxLines = Number(opts.lines) || 12;
+    const config = await loadConfig(resolveConfigPath(opts));
+    let lastHeavyAt = 0;
+
+    while (true) {
+      const now = Date.now();
+      const needsHeavy = lastHeavyAt === 0 || now - lastHeavyAt >= detailMs;
+      const agents = await scanAgents(config, {
+        enrichmentMode: needsHeavy ? "full" : "light",
+      });
+      if (needsHeavy) lastHeavyAt = now;
+      clearScreen();
+      await printDock(agents, maxLines);
+      await sleep(intervalMs);
+    }
+  });
+
+program
+  .command("watch")
+  .description("Refresh agent status in a long-lived loop")
+  .option("--interval <sec>", "Refresh interval in seconds", "10")
+  .option("--detail-interval <sec>", "Heavy enrichment refresh interval in seconds", "30")
+  .option("--json", "Output as JSON")
+  .option("--config <path>", "Path to settings.json")
+  .option("--show-dead", "Include dead sessions")
+  .action(async (opts) => {
+    const intervalSec = Number(opts.interval);
+    const detailIntervalSec = Number(opts.detailInterval);
+    const intervalMs =
+      Number.isFinite(intervalSec) && intervalSec > 0 ? intervalSec * 1000 : 10_000;
+    const detailIntervalMs =
+      Number.isFinite(detailIntervalSec) && detailIntervalSec > 0
+        ? detailIntervalSec * 1000
+        : 30_000;
+
+    const config = await loadConfig(resolveConfigPath(opts));
+    if (opts.showDead) config.display.showDead = true;
+    let lastHeavyAt = 0;
+
+    while (true) {
+      const now = Date.now();
+      const needsHeavy = lastHeavyAt === 0 || now - lastHeavyAt >= detailIntervalMs;
+      const agents = await scanAgents(config, {
+        enrichmentMode: needsHeavy ? "full" : "light",
+      });
+      if (needsHeavy) lastHeavyAt = now;
+      clearScreen();
+      if (opts.json) {
+        await printStatusJson(agents);
+      } else {
+        await printStatus(agents);
+      }
+      await sleep(intervalMs);
+    }
+  });
+
+program
+  .command("clean")
+  .description("Show or terminate unmatched processes")
+  .option("--config <path>", "Path to settings.json")
+  .option("--json", "Output as JSON")
+  .option("--kill", "Send SIGTERM to selected unmatched processes")
+  .option("--pid <pid...>", "Only include specific unmatched PID(s)")
+  .action(async (opts) => {
+    const config = await loadConfig(resolveConfigPath(opts));
+    const agents = await scanAgents(config);
+    const selectedPids = Array.isArray(opts.pid)
+      ? opts.pid
+          .map((value: string) => Number.parseInt(value, 10))
+          .filter((value: number) => !Number.isNaN(value))
+      : undefined;
+    const targets = selectUnmatchedTargets(agents, selectedPids);
+
+    if (opts.kill) {
+      for (const target of targets) {
+        try {
+          process.kill(target.pid, "SIGTERM");
+        } catch {
+          // keep going; the process may already be gone
+        }
+      }
+    }
+
+    if (opts.json) {
+      printCleanJson(targets, Boolean(opts.kill));
+    } else {
+      printCleanPlan(targets, Boolean(opts.kill));
+    }
+  });
+
+installProcessSafetyHandlers();
+program.parse();
