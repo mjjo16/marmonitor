@@ -15,9 +15,32 @@
 
 ---
 
-**marmonitor** scans AI coding agent processes on your local machine, enriches them with session metadata (tokens, phases, timestamps), and renders compact terminal-friendly views.
+## What is marmonitor?
 
-No instrumentation needed. No cloud. Just observe from the outside.
+When you run multiple AI coding agents simultaneously — Claude Code in one pane, Codex in another, Gemini in a third — it's hard to know at a glance:
+
+- Which agent is waiting for your approval?
+- Which one is actively thinking or running tools?
+- How many tokens have been consumed?
+- Is anything stalled or stuck?
+
+**marmonitor** answers all of these from your tmux status bar. It passively scans AI agent processes, reads their local session data (tokens, phases, timestamps), and renders a compact live overview — no code changes, no API keys, no cloud.
+
+<p align="center">
+  <img src="docs/use_sample.png" alt="marmonitor tmux statusbar" width="640">
+  <br>
+  <em>tmux status bar showing agent badges, phase icons, and numbered attention pills</em>
+</p>
+
+### Key Features
+
+- **Real-time status** — see all AI sessions at a glance (`status`, `watch`, `dock`)
+- **Phase tracking** — know when an agent needs approval (⏳), is thinking (🤔), or running tools (🔧)
+- **Attention priority** — permission-waiting sessions surface first, then most recently active
+- **tmux integration** — statusline badges, popup attention chooser, direct jump by number
+- **Token tracking** — input, output, and cache token counts per session
+- **Zero instrumentation** — works by reading local process info and session files, no agent modification needed
+- **Local-only** — no network, no telemetry, all data stays on your machine
 
 ## Supported Agents
 
