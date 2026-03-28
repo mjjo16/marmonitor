@@ -1,8 +1,5 @@
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
-const pkg = JSON.parse(
-  readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf-8"),
-);
+const require = createRequire(import.meta.url);
+const pkg = require("../package.json") as { version: string };
 export const VERSION: string = pkg.version;
