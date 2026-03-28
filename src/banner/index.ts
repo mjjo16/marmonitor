@@ -7,13 +7,13 @@ const INSTALL_BANNER_ASSET_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
   "..",
   "docs",
-  "banner-combined.png",
+  "banner-ansi.png",
 );
 const RUNTIME_BANNER_ASSET_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
   "..",
   "docs",
-  "banner-brown-dots-small.png",
+  "marmot-small.png",
 );
 
 const ANSI_MARMOT_PALETTE: Record<string, [number, number, number]> = {

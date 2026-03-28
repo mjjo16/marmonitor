@@ -14,9 +14,8 @@
   "files": [
     "bin/",
     "dist/",
-    "docs/banner-combined.png",
-    "docs/banner-brown-dots.png",
-    "docs/banner-brown-dots-small.png",
+    "docs/banner-ansi.png",
+    "docs/marmot-small.png",
     "README.md",
     "LICENSE"
   ],
