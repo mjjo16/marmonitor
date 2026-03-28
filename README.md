@@ -15,15 +15,17 @@
 
 ---
 
-## What is marmonitor?
+## Why marmonitor?
 
-When you run multiple AI coding agents in tmux — Claude Code in one pane, Codex in another, Gemini in a third — you lose track:
+Running multiple AI coding agents in tmux is now the norm — Claude Code refactoring your backend, Codex writing tests in another pane, Gemini reviewing docs in a third. But as sessions multiply, you hit the same wall:
 
-- Which session is waiting for your `allow`?
-- Which one finished and needs your next instruction?
-- Where was that Codex session you were just working with?
+- You switch to a pane only to find the agent has been waiting for `allow` for 10 minutes
+- You forget which window has the Codex session you were just working with
+- You have no idea how many tokens you've burned across sessions
 
-**marmonitor** puts all of this in your tmux status bar.
+**There's no dashboard for this.** You're alt-tabbing between panes, checking each one manually.
+
+**marmonitor** fixes this. One line in your tmux.conf, and your status bar becomes a live control panel for every AI session on your machine.
 
 <p align="center">
   <img src="docs/use_sample.png" alt="marmonitor tmux statusbar" width="640">
@@ -54,6 +56,8 @@ When you run multiple AI coding agents in tmux — Claude Code in one pane, Code
 </p>
 
 **Zero setup** — no API keys, no agent plugins, no code changes. marmonitor reads local process info and session files from the outside. Install, add one line to tmux.conf, done.
+
+> **Built for the tmux + AI multi-session workflow.** If you run 5+ AI coding sessions daily across different projects, marmonitor turns context-switching from guesswork into a glance at your status bar.
 
 ## Supported Agents
 
