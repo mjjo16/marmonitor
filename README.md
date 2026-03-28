@@ -153,48 +153,20 @@ marmonitor settings-init --stdout
 
 ## Safety
 
-- **Read-only by default** — marmonitor observes, it doesn't modify your sessions
-- **Fail-open guard** — `marmonitor guard` returns `allow` on any error
+- **Read-only by default** — observes only, never modifies your sessions
 - **No network** — zero outbound connections, all data stays local
-- **Conservative defaults** — intervention off, terminal integration opt-in
-- `clean --kill` is the only destructive command (experimental, requires explicit flag)
+- **Conservative defaults** — all integrations are opt-in
 
-## Architecture
+## Contributing
 
-```
-Process List (OS)
-      |
-      v
- [ Scanner ]  -->  [ Output ]  -->  Terminal Surfaces
-   detect           text/JSON        stdout, tmux, WezTerm
-   enrich           badges
-   phase            pills
-      |
-      v
- [  Guard  ]       [ Config ]
-   hooks             XDG + merge
-   rules
-```
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for details.
-
-## Development
-
-```bash
-npm run build        # Compile TypeScript
-npm run dev          # Watch mode
-npm run lint         # Biome linter
-npm test             # Node.js native test runner
-```
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for commit conventions, branch naming, and PR guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, commit conventions, and PR guidelines. For architecture details, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Known Limitations
 
-- Precise pane jump is tmux-only
-- Gemini permission detection is limited (Ink TUI overlay not capturable)
+- Pane jump requires tmux
+- Gemini permission detection is limited due to Ink TUI architecture
 - Phase detection relies on heuristics — accuracy varies by agent
-- macOS first; Linux works but is not release-verified
+- macOS first; Linux support is untested
 
 ## License
 
