@@ -69,11 +69,38 @@ Running multiple AI coding agents in tmux is now the norm — Claude Code refact
 
 ## Install
 
+### 1. Install marmonitor
+
 ```bash
 npm install -g marmonitor
 ```
 
-Or from source:
+### 2. Add tmux plugin
+
+Using [tpm](https://github.com/tmux-plugins/tpm) (recommended):
+
+```bash
+# Add to ~/.tmux.conf
+set -g @plugin 'mjjo16/marmonitor-tmux'
+```
+
+Then press `prefix + I` inside tmux to install. Done.
+
+<details>
+<summary>Manual install (without tpm)</summary>
+
+```bash
+git clone https://github.com/mjjo16/marmonitor-tmux ~/.tmux/plugins/marmonitor-tmux
+```
+
+Add to `~/.tmux.conf`:
+```bash
+run-shell ~/.tmux/plugins/marmonitor-tmux/marmonitor.tmux
+```
+</details>
+
+<details>
+<summary>Install from source (development)</summary>
 
 ```bash
 git clone https://github.com/mjjo16/marmonitor.git
@@ -81,25 +108,26 @@ cd marmonitor
 npm install && npm run build
 npm link
 ```
+</details>
 
 ## Quick Start
 
+Once installed, your tmux status bar automatically shows AI session badges. You also get:
+
+| Shortcut | Action |
+|----------|--------|
+| `prefix + a` | Attention popup — choose a session to review |
+| `prefix + j` | Jump popup — pick a session to jump to |
+| `prefix + m` | Dock — compact monitor pane |
+| `Option+1~5` | Direct jump to attention session #1~5 |
+
+CLI commands:
+
 ```bash
-# Full session inventory
-marmonitor status
-
-# Focused attention list — what needs your input?
-marmonitor attention
-
-# Long-running monitor
-marmonitor watch
-marmonitor dock          # compact, for tmux panes
-
-# Jump to a session's tmux pane
-marmonitor jump --attention-index 1
-
-# tmux statusline widget
-marmonitor --statusline --statusline-format tmux-badges
+marmonitor status       # Full session inventory
+marmonitor attention    # What needs your input?
+marmonitor watch        # Live full-screen monitor
+marmonitor help         # All commands and options
 ```
 
 ## Phase Icons
@@ -121,32 +149,15 @@ marmonitor --statusline --statusline-format tmux-badges
 | `[Dead]` | Session file exists but process is gone |
 | `[Unmatched]` | AI process found but no matching session |
 
-## Terminal Integration
+## tmux Plugin
 
-### tmux
+The [marmonitor-tmux](https://github.com/mjjo16/marmonitor-tmux) plugin handles all tmux setup automatically:
 
-Add to your `~/.tmux.conf`:
+- 2nd status line with agent badges and attention pills
+- Key bindings for popup, jump, and dock
+- Option+1~5 direct jump
 
-```bash
-# Two-line status bar with AI session badges
-set -g status-right '#(marmonitor --statusline --statusline-format tmux-badges)'
-
-# Popup attention chooser (prefix + a)
-bind a display-popup -E -w 80 -h 20 "marmonitor attention --interactive"
-
-# Direct jump by number (Option+1~5)
-bind -n M-1 run-shell "marmonitor jump --attention-index 1"
-```
-
-See [`examples/tmux/`](examples/tmux/) for full setup.
-
-### Non-tmux terminal surfaces
-
-WezTerm / iTerm2 terminal-native surfaces are currently paused.
-
-- `marmonitor` is `tmux-first`
-- non-tmux bars are not part of the supported default setup right now
-- existing WezTerm example files remain in the repo as paused reference material, not active product surface
+All settings are customizable via `@marmonitor-*` options. See the [plugin README](https://github.com/mjjo16/marmonitor-tmux) for details.
 
 ## Configuration
 
