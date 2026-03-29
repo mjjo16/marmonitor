@@ -17,11 +17,12 @@ describe("supportsInlineBannerImage", () => {
 });
 
 describe("renderInstallInfo", () => {
-  it("includes quick start commands and docs link", () => {
+  it("includes setup guide, commands, and docs link", () => {
     const text = renderInstallInfo();
     assert.match(text, /marmonitor v\d+\.\d+\.\d+/);
+    assert.match(text, /marmonitor setup tmux/);
     assert.match(text, /marmonitor status/);
-    assert.match(text, /marmonitor dock/);
+    assert.match(text, /uninstall-integration/);
     assert.match(text, /github\.com\/mjjo16\/marmonitor/);
   });
 });
@@ -36,7 +37,7 @@ describe("renderInstallBanner / renderRuntimeBanner", () => {
   it("falls back to ANSI/text when inline image is not supported", () => {
     assert.match(
       renderInstallBanner({ TERM_PROGRAM: "WezTerm" }),
-      /Standing guard over your AI sessions/,
+      /Standing guard over your AI coding sessions/,
     );
     assert.match(
       renderRuntimeBanner(2, { TERM_PROGRAM: "WezTerm" }),
