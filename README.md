@@ -55,7 +55,7 @@ Running multiple AI coding agents in tmux is now the norm — Claude Code refact
   <em>All sessions with status, tokens, phase, CPU/MEM, and worker process tree</em>
 </p>
 
-**Zero setup** — no API keys, no agent plugins, no code changes. marmonitor reads local process info and session files from the outside. Install, add one line to tmux.conf, done.
+**Zero instrumentation** — no API keys, no agent plugins, no code changes. marmonitor reads local process info and session files from the outside. Two commands to get started: `npm install -g marmonitor` then `marmonitor setup tmux`.
 
 > **Built for the tmux + AI multi-session workflow.** If you run 5+ AI coding sessions daily across different projects, marmonitor turns context-switching from guesswork into a glance at your status bar.
 
@@ -75,16 +75,23 @@ Running multiple AI coding agents in tmux is now the norm — Claude Code refact
 npm install -g marmonitor
 ```
 
-### 2. Add tmux plugin
-
-Using [tpm](https://github.com/tmux-plugins/tpm) (recommended):
+### 2. Set up tmux integration
 
 ```bash
-# Add to ~/.tmux.conf
+marmonitor setup tmux
+```
+
+This adds the [marmonitor-tmux](https://github.com/mjjo16/marmonitor-tmux) plugin to your `~/.tmux.conf`. Then press `prefix + I` inside tmux to activate.
+
+<details>
+<summary>Or add manually to ~/.tmux.conf</summary>
+
+```bash
 set -g @plugin 'mjjo16/marmonitor-tmux'
 ```
 
-Then press `prefix + I` inside tmux to install. Done.
+Requires [tpm](https://github.com/tmux-plugins/tpm).
+</details>
 
 <details>
 <summary>Manual install (without tpm)</summary>
@@ -204,6 +211,13 @@ marmonitor settings-init --stdout
     }
   }
 }
+```
+
+## Uninstall
+
+```bash
+marmonitor uninstall-integration    # Remove tmux settings + restore status bar
+npm uninstall -g marmonitor         # Remove CLI
 ```
 
 ## Safety
