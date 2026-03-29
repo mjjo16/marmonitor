@@ -1,7 +1,7 @@
 ---
-name: Bug Report
-about: Report a bug to help us improve marmonitor
-title: ""
+name: "[BUG] Bug Report"
+about: Report a bug — title must start with [BUG]
+title: "[BUG] "
 labels: bug
 assignees: ""
 ---
@@ -28,13 +28,11 @@ What actually happened. Include terminal output if relevant.
 
 - **OS**: (e.g., macOS 14.3, Ubuntu 22.04)
 - **Node.js**: (e.g., v20.11.0)
-- **marmonitor**: (e.g., v0.1.0 — run `marmonitor --version`)
-- **Terminal**: (e.g., iTerm2, Terminal.app, WezTerm)
+- **marmonitor**: (run `marmonitor --version`)
+- **Terminal**: (e.g., iTerm2, Terminal.app)
 - **tmux**: (e.g., 3.4, or "not using tmux")
 
 ## AI Agents Running
-
-Which AI coding agents were active when the bug occurred?
 
 - [ ] Claude Code
 - [ ] Codex

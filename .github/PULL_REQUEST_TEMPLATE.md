@@ -1,8 +1,25 @@
+<!-- PR title format: [TYPE] #{issue} description -->
+<!-- Examples: [FEAT] #1 Add risk alert badges to statusline -->
+<!--           [BUG] #5 Fix stalled permission excluded from attention -->
+<!--           [HOTFIX] #8 Crash on startup with missing config -->
+
 ## Summary
 
-<!-- What does this PR do? Link related issues with "Resolve #123" -->
+<!-- What does this PR do? Link related issues with "Resolve #N" -->
 
 Resolve #
+
+## Type
+
+- [ ] `[FEAT]` New feature
+- [ ] `[BUG]` Bug fix
+- [ ] `[HOTFIX]` Urgent fix
+- [ ] `[PERF]` Performance improvement
+- [ ] `[REFACTOR]` Code restructuring
+- [ ] `[DOCS]` Documentation
+- [ ] `[TEST]` Test coverage
+- [ ] `[CICD]` CI/CD or release
+- [ ] `[CHORE]` Maintenance
 
 ## Changes
 

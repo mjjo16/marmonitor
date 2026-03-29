@@ -1,7 +1,7 @@
 ---
-name: Feature Request
-about: Suggest a new feature or improvement
-title: ""
+name: "[FEAT] Feature Request"
+about: Suggest a new feature — title must start with [FEAT]
+title: "[FEAT] "
 labels: enhancement
 assignees: ""
 ---
