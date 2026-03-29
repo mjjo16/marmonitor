@@ -46,6 +46,16 @@ describe("config CLI helpers", () => {
     const output = runCli(["--help"]);
     assert.match(output, /debug-phase \[options\]/);
   });
+
+  it("includes phase icon legend in help output", () => {
+    const output = runCli(["--help"]);
+    assert.match(output, /permission/);
+    assert.match(output, /thinking/);
+    assert.match(output, /tool/);
+    assert.match(output, /done/);
+    assert.match(output, /Active/);
+    assert.match(output, /Stalled/);
+  });
 });
 
 describe("postinstall/preuninstall scripts", () => {
