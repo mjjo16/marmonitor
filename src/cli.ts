@@ -615,6 +615,20 @@ program
       await printStatusJson(agents);
     } else {
       await printStatus(agents);
+
+      // Show setup hint if tmux plugin not configured
+      try {
+        const { hasMarmonitorPlugin } = await import("./tmux/setup.js");
+        const { homedir } = await import("node:os");
+        const { join } = await import("node:path");
+        const confPath = join(homedir(), ".tmux.conf");
+        if (!(await hasMarmonitorPlugin(confPath))) {
+          console.log("\ntmux integration not configured.");
+          console.log("  Run: marmonitor setup tmux\n");
+        }
+      } catch {
+        // silent — setup check must never break status
+      }
     }
   });
 
