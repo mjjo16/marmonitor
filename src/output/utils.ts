@@ -740,7 +740,7 @@ export function buildTmuxAttentionPills(
     .slice(0, layout.itemCount);
 
   if (jumpItems.length === 0) {
-    return tmuxDetailBlock("✅ all ok");
+    return tmuxDetailBlock("no active");
   }
 
   const segments = jumpItems.map((item, index) => {

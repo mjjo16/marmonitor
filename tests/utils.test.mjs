@@ -980,6 +980,37 @@ describe("buildAttentionItems", () => {
     assert.match(text, /#\[bold,fg=/);
   });
 
+  it("shows no active when no attention items exist", () => {
+    const text = buildTmuxAttentionPills([], 5);
+    assert.match(text, /no active/);
+    assert.doesNotMatch(text, /all ok/);
+  });
+
+  it("shows no active when only unmatched/stalled items exist", () => {
+    const text = buildTmuxAttentionPills(
+      [
+        {
+          kind: "unmatched",
+          priority: 0,
+          pid: 10,
+          agentName: "Codex",
+          cwd: "/tmp",
+          status: "Unmatched",
+        },
+        {
+          kind: "stalled",
+          priority: 2,
+          pid: 20,
+          agentName: "Claude Code",
+          cwd: "/tmp",
+          status: "Stalled",
+        },
+      ],
+      5,
+    );
+    assert.match(text, /no active/);
+  });
+
   it("reduces tmux attention pills on narrow widths", () => {
     const now = Math.floor(Date.now() / 1000);
     const text = buildTmuxAttentionPills(
