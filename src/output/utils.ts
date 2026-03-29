@@ -294,7 +294,7 @@ export function advanceJsonlCursor(
 }
 
 export function detectApprovalPromptPhase(
-  output: string,
+  output: unknown,
   patterns = [
     "would you like to",
     "approve this",
@@ -311,6 +311,7 @@ export function detectApprovalPromptPhase(
     "changes applied",
   ],
 ): SessionPhase {
+  if (!output || typeof output !== "string") return undefined;
   const recentLines = output
     .split("\n")
     .map((line) => line.trim())

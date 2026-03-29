@@ -113,6 +113,22 @@ describe("parseGeminiSessionContent", () => {
   it("returns empty data for malformed Gemini session content", () => {
     assert.deepEqual(parseGeminiSessionContent("{invalid"), {});
   });
+
+  it("handles null/undefined items in messages array without crashing", () => {
+    const parsed = parseGeminiSessionContent(
+      JSON.stringify({
+        messages: [null, undefined, { type: "user", timestamp: "2026-03-28T10:00:00Z" }],
+      }),
+    );
+    assert.equal(parsed.phase, "thinking");
+  });
+
+  it("handles message with missing fields gracefully", () => {
+    const parsed = parseGeminiSessionContent(
+      JSON.stringify({ messages: [{ type: "gemini" }, {}] }),
+    );
+    assert.ok(parsed.phase === "done" || parsed.phase === undefined);
+  });
 });
 
 describe("propagateWorkerStateToParent", () => {

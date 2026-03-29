@@ -43,7 +43,9 @@ export function toEpochSec(value: string | undefined): number | undefined {
 export function parseGeminiSessionContent(raw: string): Partial<GeminiSessionMeta> {
   try {
     const data = JSON.parse(raw);
-    const messages = Array.isArray(data.messages) ? (data.messages as GeminiMessage[]) : [];
+    const messages = Array.isArray(data.messages)
+      ? (data.messages as GeminiMessage[]).filter((msg): msg is GeminiMessage => msg != null)
+      : [];
     const latestMessage = messages.at(-1);
     const latestGeminiMessage = [...messages].reverse().find((msg) => msg.type === "gemini");
     const lastActivityAt =

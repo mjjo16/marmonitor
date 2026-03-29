@@ -188,6 +188,16 @@ describe("detectApprovalPromptPhase", () => {
     assert.equal(detectApprovalPromptPhase("streaming tokens..."), undefined);
   });
 
+  it("returns undefined for empty string", () => {
+    assert.equal(detectApprovalPromptPhase(""), undefined);
+  });
+
+  it("returns undefined for non-string input", () => {
+    assert.equal(detectApprovalPromptPhase(null), undefined);
+    assert.equal(detectApprovalPromptPhase(undefined), undefined);
+    assert.equal(detectApprovalPromptPhase(42), undefined);
+  });
+
   it("supports custom approval patterns", () => {
     assert.equal(
       detectApprovalPromptPhase("Need confirmation before proceeding", ["need confirmation"]),
