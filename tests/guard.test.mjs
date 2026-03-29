@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { dirname } from "node:path";
+import { join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { getDefaults } from "../dist/config/index.js";
 import {
@@ -150,8 +153,9 @@ describe("formatGuardOutput", () => {
 
 describe("guard CLI fail-open", () => {
   it("returns allow for malformed stdin payload", async () => {
+    const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
     const { stdout } = await execFileAsync("node", ["bin/marmonitor.js", "guard"], {
-      cwd: "/Users/macrent/Documents/mjjo/marmonitor",
+      cwd: repoRoot,
       input: "{not-json",
     });
     assert.equal(stdout.trim(), '{"decision":"allow"}');
