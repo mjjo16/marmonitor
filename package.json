@@ -48,7 +48,7 @@
     "start": "node bin/marmonitor.js",
     "lint": "biome check src tests",
     "test": "node --test tests/*.test.mjs",
-    "postinstall": "node bin/postinstall.js",
+    "postinstall": "node bin/postinstall.cjs",
     "preuninstall": "node bin/preuninstall.cjs",
     "prepublishOnly": "npm run build && npm test"
   },

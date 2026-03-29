@@ -49,14 +49,21 @@ describe("config CLI helpers", () => {
 });
 
 describe("postinstall/preuninstall scripts", () => {
-  it("postinstall outputs banner and setup guide", () => {
-    const output = execFileSync("node", [join(repoRoot, "bin", "postinstall.js")], {
+  it("postinstall outputs install guide to stderr", () => {
+    const output = execFileSync("node", [join(repoRoot, "bin", "postinstall.cjs")], {
       encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
     });
-    assert.match(output, /marmonitor installed/);
-    assert.match(output, /marmonitor setup tmux/);
-    assert.match(output, /marmonitor status/);
-    assert.match(output, /marmonitor help/);
+    // stderr is captured via shell redirect
+    const merged = execFileSync(
+      "sh",
+      ["-c", `node "${join(repoRoot, "bin", "postinstall.cjs")}" 2>&1`],
+      { encoding: "utf8" },
+    );
+    assert.match(merged, /marmonitor.*installed/);
+    assert.match(merged, /marmonitor setup tmux/);
+    assert.match(merged, /marmonitor status/);
+    assert.match(merged, /uninstall-integration/);
   });
 
   it("preuninstall runs without error", () => {
