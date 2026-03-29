@@ -1021,6 +1021,18 @@ program
     } else {
       console.log("No marmonitor settings found in ~/.tmux.conf");
     }
+
+    // Restore tmux memory state (status bar → 1 line, remove status-format[1])
+    try {
+      const { execFile: ef } = await import("node:child_process");
+      const { promisify: p } = await import("node:util");
+      const exec = p(ef);
+      await exec("tmux", ["set", "-g", "status", "on"]);
+      await exec("tmux", ["set", "-gu", "status-format[1]"]);
+      console.log("✓ Restored tmux status bar to single line");
+    } catch {
+      console.log("  tmux not running — restart tmux to apply changes");
+    }
   });
 
 installProcessSafetyHandlers();
