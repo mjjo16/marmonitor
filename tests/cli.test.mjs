@@ -47,3 +47,23 @@ describe("config CLI helpers", () => {
     assert.match(output, /debug-phase \[options\]/);
   });
 });
+
+describe("postinstall/preuninstall scripts", () => {
+  it("postinstall outputs banner and setup guide", () => {
+    const output = execFileSync("node", [join(repoRoot, "bin", "postinstall.js")], {
+      encoding: "utf8",
+    });
+    assert.match(output, /marmonitor installed/);
+    assert.match(output, /marmonitor setup tmux/);
+    assert.match(output, /marmonitor status/);
+    assert.match(output, /marmonitor help/);
+  });
+
+  it("preuninstall runs without error", () => {
+    const output = execFileSync("node", [join(repoRoot, "bin", "preuninstall.cjs")], {
+      encoding: "utf8",
+    });
+    // Should not throw. Output may be empty if no tmux.conf plugin line.
+    assert.equal(typeof output, "string");
+  });
+});
