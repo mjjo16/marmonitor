@@ -982,5 +982,46 @@ program
     }
   });
 
+program
+  .command("setup")
+  .description("Set up marmonitor integrations")
+  .argument("<target>", "Integration target (tmux)")
+  .action(async (target: string) => {
+    if (target !== "tmux") {
+      console.error(`Unknown target: ${target}. Supported: tmux`);
+      process.exit(1);
+    }
+    const { addMarmonitorPlugin, hasMarmonitorPlugin } = await import("./tmux/setup.js");
+    const { homedir } = await import("node:os");
+    const { join } = await import("node:path");
+    const confPath = join(homedir(), ".tmux.conf");
+
+    if (await hasMarmonitorPlugin(confPath)) {
+      console.log("tmux integration already configured.");
+      return;
+    }
+
+    await addMarmonitorPlugin(confPath);
+    console.log("✓ Added marmonitor-tmux plugin to ~/.tmux.conf");
+    console.log("Press prefix+I inside tmux to activate.");
+  });
+
+program
+  .command("uninstall-integration")
+  .description("Remove marmonitor settings from tmux.conf")
+  .action(async () => {
+    const { removeMarmonitorPlugin } = await import("./tmux/setup.js");
+    const { homedir } = await import("node:os");
+    const { join } = await import("node:path");
+    const confPath = join(homedir(), ".tmux.conf");
+
+    const removed = await removeMarmonitorPlugin(confPath);
+    if (removed) {
+      console.log("✓ Removed marmonitor-tmux plugin from ~/.tmux.conf");
+    } else {
+      console.log("No marmonitor settings found in ~/.tmux.conf");
+    }
+  });
+
 installProcessSafetyHandlers();
 program.parse();
