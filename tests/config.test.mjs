@@ -55,9 +55,9 @@ describe("getDefaults", () => {
     assert.deepEqual(config.paths.claudeSessions, []);
     assert.deepEqual(config.paths.codexSessions, []);
     assert.deepEqual(config.paths.extraRoots, []);
-    assert.equal(config.performance.snapshotTtlMs, 5000);
-    assert.equal(config.performance.statuslineTtlMs, 5000);
-    assert.equal(config.performance.stdoutHeuristicTtlMs, 5000);
+    assert.equal(config.performance.snapshotTtlMs, 2000);
+    assert.equal(config.performance.statuslineTtlMs, 2000);
+    assert.equal(config.performance.stdoutHeuristicTtlMs, 2000);
   });
 
   it("includes all three default agents", () => {
@@ -163,7 +163,7 @@ describe("loadConfig", () => {
       assert.equal(config.integration.wezterm.statusTtlSec, 15);
       assert.equal(config.integration.banner.install, true);
       assert.deepEqual(config.paths.extraRoots, []);
-      assert.equal(config.performance.snapshotTtlMs, 5000);
+      assert.equal(config.performance.snapshotTtlMs, 2000);
       assert.deepEqual(config.agents.Codex.processNames, ["codex"]);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -329,7 +329,7 @@ describe("loadConfig", () => {
       assert.deepEqual(config.paths.claudeSessions, []);
       assert.deepEqual(config.paths.extraRoots, ["~/work"]);
       assert.equal(config.performance.snapshotTtlMs, 3000);
-      assert.equal(config.performance.statuslineTtlMs, 5000);
+      assert.equal(config.performance.statuslineTtlMs, 2000);
       assert.equal(config.performance.stdoutHeuristicTtlMs, 2000);
     } finally {
       await rm(dir, { recursive: true, force: true });

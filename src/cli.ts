@@ -898,12 +898,12 @@ program
 program
   .command("dock")
   .description("Compact persistent monitor for tmux pane")
-  .option("--interval <sec>", "Refresh interval in seconds", "5")
+  .option("--interval <sec>", "Refresh interval in seconds", "2")
   .option("--detail-interval <sec>", "Heavy enrichment interval", "30")
   .option("--lines <n>", "Max display lines", "12")
   .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
-    const intervalMs = Math.max(Number(opts.interval) || 5, 2) * 1000;
+    const intervalMs = Math.max(Number(opts.interval) || 2, 2) * 1000;
     const detailMs = Math.max(Number(opts.detailInterval) || 30, 5) * 1000;
     const maxLines = Number(opts.lines) || 12;
     const config = await loadConfig(resolveConfigPath(opts));
@@ -925,7 +925,7 @@ program
 program
   .command("watch")
   .description("Refresh agent status in a long-lived loop")
-  .option("--interval <sec>", "Refresh interval in seconds", "10")
+  .option("--interval <sec>", "Refresh interval in seconds", "2")
   .option("--detail-interval <sec>", "Heavy enrichment refresh interval in seconds", "30")
   .option("--json", "Output as JSON")
   .option("--config <path>", "Path to settings.json")

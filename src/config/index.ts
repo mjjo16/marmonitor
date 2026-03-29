@@ -168,9 +168,9 @@ const DEFAULTS: MarmonitorConfig = {
     extraRoots: [],
   },
   performance: {
-    snapshotTtlMs: 5000,
-    statuslineTtlMs: 5000,
-    stdoutHeuristicTtlMs: 5000,
+    snapshotTtlMs: 2000,
+    statuslineTtlMs: 2000,
+    stdoutHeuristicTtlMs: 2000,
   },
 };
 
