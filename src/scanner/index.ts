@@ -113,11 +113,14 @@ export async function scanAgents(
       lastResponseAt = cachedEnrichment.lastResponseAt;
       lastActivityAt = cachedEnrichment.lastActivityAt;
     } else if (agentName === "Claude Code") {
-      const claudeData = await parseClaudeSession(proc.pid, config);
+      // Get cwd and start time early so mtime-based matching can use them
+      const processCwd = (await getProcessCwd(proc.pid)) ?? undefined;
+      const processStartTime = await getProcessStartTime(proc.pid);
+      const claudeData = await parseClaudeSession(proc.pid, processCwd, processStartTime, config);
       if (claudeData.cwd) cwd = claudeData.cwd;
-      if (cwd === "unknown") cwd = (await getProcessCwd(proc.pid)) ?? "unknown";
+      if (cwd === "unknown") cwd = processCwd ?? "unknown";
       sessionId = claudeData.sessionId;
-      startedAt = claudeData.startedAt;
+      startedAt = claudeData.startedAt ?? processStartTime;
       tokenUsage = claudeData.tokenUsage;
       model = claudeData.model;
       sessionMatched = claudeData.sessionMatched ?? false;
