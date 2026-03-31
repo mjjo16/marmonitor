@@ -2,8 +2,8 @@
  * Small cross-process cache helpers backed by files under TMPDIR.
  */
 
-import { createHash } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -59,11 +59,14 @@ export async function writeSharedCache<T>(
 ): Promise<void> {
   const path = resolveSharedCachePath(namespace, key, options.cacheRoot);
   const checkedAt = options.nowMs ?? Date.now();
+  const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
 
   try {
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, JSON.stringify({ checkedAt, value }), "utf-8");
+    await writeFile(tempPath, JSON.stringify({ checkedAt, value }), "utf-8");
+    await rename(tempPath, path);
   } catch {
+    await rm(tempPath, { force: true }).catch(() => undefined);
     // cross-process cache failures must never break scanning
   }
 }

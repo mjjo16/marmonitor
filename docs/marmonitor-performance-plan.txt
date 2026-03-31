@@ -90,10 +90,12 @@ marmonitor 성능 개선 실행 계획
 - Codex / Gemini / dead Claude 세션 스캔은 `existsSync` 선확인 대신 실제 `readdir` / `readFile` 실패를 분기로 사용해 중복 syscall을 줄인다.
 - stdout heuristic는 cross-process shared cache를 사용해 같은 PID/cwd에 대한 tmux pane lookup과 capture를 새 CLI 실행 간 재사용한다.
 - process cwd 조회는 cross-process shared cache를 사용해 같은 PID에 대한 `lsof` 결과를 새 CLI 실행 간 재사용한다.
+- process start time 조회도 cross-process shared cache를 사용해 같은 PID에 대한 `ps -o lstart=` 결과를 새 CLI 실행 간 재사용한다.
 - Claude session resolution은 `sessionId + cwd + startedAt` 기준 cross-process shared cache를 사용해 session file path를 새 CLI 실행 간 재사용한다.
 - Claude phase detect는 `sessionFile + mtime + size` 기준 cross-process shared cache를 사용해 JSONL tail parse를 새 CLI 실행 간 재사용한다.
 - Codex phase detect도 `sessionFile + mtime + size` 기준 cross-process shared cache를 사용해 phase parse를 새 CLI 실행 간 재사용한다.
 - `ps-list`와 `pidusage`도 1초짜리 cross-process shared cache를 사용해 같은 PID 집합에 대한 process scan/metrics 조회를 새 CLI 실행 간 재사용한다.
+- shared cache 파일 쓰기는 temp file + rename으로 바꿔 partial write가 cache miss로만 폴백되도록 정리한다.
 - 완료 기준
   - Codex / Claude가 전체 스캔 비용의 대부분을 차지하지 않게 된다.
 
@@ -137,3 +139,7 @@ marmonitor 성능 개선 실행 계획
 - 2026-03-31: `tests/runtime-cache.test.mjs`에 process list shared cache, pidusage shared cache 회귀 테스트를 추가했다.
 - 2026-03-31: `npm run build`, `npm run lint`, `npm test` 재통과. 총 185개 테스트 통과.
 - 2026-03-31: 실제 tmux 기준 재실측에서 forced snapshot miss wall time은 `1.25s`, `1.50s`였고, 같은 구간의 `pidusage`는 `677ms`, `806ms`, `ps-list`는 `114ms`, `218ms` 수준이었다.
+- 2026-03-31: `getProcessStartTime`에도 cross-process shared cache를 추가해 같은 PID의 `ps -o lstart=` 재호출을 새 CLI 실행 간 줄였다.
+- 2026-03-31: shared cache 파일 쓰기를 temp file + rename으로 바꿔 경쟁 상황에서 partial write가 의미 오류가 아니라 cache miss 폴백으로만 이어지게 정리했다.
+- 2026-03-31: `tests/runtime-cache.test.mjs`에 process start-time shared cache hit / negative cache hit 회귀 테스트를 추가했다.
+- 2026-03-31: `npm run build`, `npm run lint`, `npm test` 재통과. 총 187개 테스트 통과.

@@ -11,11 +11,12 @@ import {
   claudeSessionRegistry,
   codexPhaseCache,
   processCwdCache,
+  processStartCache,
   stdoutHeuristicCache,
 } from "../dist/scanner/cache.js";
 import { detectClaudePhase, resolveClaudeSessionFile } from "../dist/scanner/claude.js";
 import { detectCodexPhase } from "../dist/scanner/codex.js";
-import { getProcessCwd } from "../dist/scanner/process.js";
+import { getProcessCwd, getProcessStartTime } from "../dist/scanner/process.js";
 import { getPidUsageCached, listProcessesCached } from "../dist/scanner/runtime-snapshot.js";
 import { detectCliStdoutPhase } from "../dist/scanner/status.js";
 
@@ -163,6 +164,71 @@ describe("shared process cwd cache", () => {
 
     processCwdCache.clear();
     const second = await getProcessCwd(88_002, {
+      cacheRoot,
+      nowMs: 2_000,
+      execFile: async () => {
+        throw new Error("shared cache miss");
+      },
+    });
+
+    assert.equal(second, undefined);
+    assert.equal(execCalls, 1);
+  });
+});
+
+describe("shared process start cache", () => {
+  it("reuses start times across in-memory cache clears", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "marmonitor-start-cache-"));
+    let execCalls = 0;
+
+    processStartCache.clear();
+    const first = await getProcessStartTime(88_003, {
+      cacheRoot,
+      nowMs: 1_000,
+      execFile: async () => {
+        execCalls += 1;
+        return {
+          stdout: "Mon Mar 31 10:00:00 2026\n",
+          stderr: "",
+        };
+      },
+    });
+
+    assert.equal(first, new Date("Mon Mar 31 10:00:00 2026").getTime() / 1000);
+    assert.equal(execCalls, 1);
+
+    processStartCache.clear();
+    const second = await getProcessStartTime(88_003, {
+      cacheRoot,
+      nowMs: 2_000,
+      execFile: async () => {
+        throw new Error("shared cache miss");
+      },
+    });
+
+    assert.equal(second, first);
+    assert.equal(execCalls, 1);
+  });
+
+  it("reuses negative start times across in-memory cache clears", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "marmonitor-start-negative-"));
+    let execCalls = 0;
+
+    processStartCache.clear();
+    const first = await getProcessStartTime(88_004, {
+      cacheRoot,
+      nowMs: 1_000,
+      execFile: async () => {
+        execCalls += 1;
+        throw new Error("ps failed");
+      },
+    });
+
+    assert.equal(first, undefined);
+    assert.equal(execCalls, 1);
+
+    processStartCache.clear();
+    const second = await getProcessStartTime(88_004, {
       cacheRoot,
       nowMs: 2_000,
       execFile: async () => {
