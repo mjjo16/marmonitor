@@ -144,3 +144,5 @@ marmonitor 성능 개선 실행 계획
 - 2026-03-31: shared cache뿐 아니라 snapshot/statusline cache 파일 쓰기도 temp file + rename으로 바꿔 경쟁 상황에서 partial write가 의미 오류가 아니라 cache miss 폴백으로만 이어지게 정리했다.
 - 2026-03-31: `tests/runtime-cache.test.mjs`에 process start-time shared cache hit / negative hit / identity partition 회귀 테스트를 추가했고, `tests/snapshot-cache.test.mjs`에 atomic cache write 테스트를 추가했다.
 - 2026-03-31: `npm run build`, `npm run lint`, `npm test` 재통과. 총 189개 테스트 통과.
+- 2026-03-31: 최신 head에서 실제 tmux 기준으로 다시 재실측했다. `statusline-only` shared runtime snapshot 제한 이후에도 cold `1.47s`, warm `0.05s`, forced snapshot miss `1.35s`, `1.16s`를 확인했다.
+- 2026-03-31: 같은 forced miss 구간에서 `pidusage`는 `933.5ms`, `769.1ms`, `ps-list`는 `166.6ms`, `194.3ms` 수준이었다. `lsof`, `ps_lstart`, tmux resolve/capture는 더 이상 상위 단계로 보이지 않았다.

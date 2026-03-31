@@ -69,7 +69,7 @@ marmonitor statusline live findings
 - shared cache뿐 아니라 snapshot/statusline cache 파일 쓰기도 temp file + rename으로 바꿔 partial write가 cache miss 폴백으로만 이어지게 정리했다.
 - 이 변경은 기능 의미를 바꾸지 않고, 새 CLI 실행이 동일한 session file path / phase 결과를 다시 읽지 않게 만드는 구조 개선이다.
 - 회귀 테스트는 shared cache hit 시 in-memory cache를 비워도 `open()` 재호출 없이 같은 결과를 반환하는 방식으로 고정했다.
-- 이 후속 변경은 보수적 안정화 성격이라 live perf 재실측은 아직 다시 하지 않았다.
+- 이 후속 변경 뒤 실제 tmux에서 다시 재실측했다.
 
 ps-list / pidusage 후속 측정
 - `ps-list`와 `pidusage`에도 1초짜리 cross-process shared cache를 추가했지만, 현재는 `statusline` 경로에서만 사용한다.
@@ -83,3 +83,18 @@ ps-list / pidusage 후속 측정
 - 해석:
   - `stdout/tmux/lsof/Claude/Codex` 재사용에 더해 `pidusage`까지 재사용되면 forced miss 구간은 더 안정적으로 짧아진다.
   - 다만 shared cache가 비어 있는 완전 cold start는 여전히 `pidusage`와 session phase 해석 비용에 크게 흔들린다.
+
+최신 head 재실측
+- `ps-list` / `pidusage` 1초 shared snapshot을 `--statusline` 경로로만 좁힌 뒤 실제 tmux에서 다시 측정했다.
+- 같은 환경에서 재측정한 결과:
+  - cold wall time: `1.47s`
+  - warm wall time: `0.05s`
+  - forced snapshot miss wall time: `1.35s`, `1.16s`
+- 같은 forced miss 구간의 주요 단계:
+  - `pidusage`: `933.5ms`, `769.1ms`
+  - `ps-list`: `166.6ms`, `194.3ms`
+  - `renderStatusline`: `80.1ms`, `48.0ms`
+- forced miss summary에는 `lsof`, `ps_lstart`, `resolveTmuxJumpTarget`, `captureTmuxPaneOutput`가 더 이상 별도 상위 단계로 나타나지 않았다.
+- 해석:
+  - `statusline-only`로 shared runtime snapshot 범위를 좁혀도 warm path와 forced miss 개선은 유지된다.
+  - 현재 남은 주병목은 여전히 `pidusage`다.
