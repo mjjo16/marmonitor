@@ -153,6 +153,7 @@ describe("formatGuardOutput", () => {
 
 describe("guard CLI fail-open", () => {
   it("returns allow for malformed stdin payload", async () => {
+    const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
     const { stdout } = await execFileAsync("node", ["bin/marmonitor.js", "guard"], {
       cwd: repoRoot,
       input: "{not-json",
