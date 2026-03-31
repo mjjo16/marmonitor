@@ -22,6 +22,19 @@ marmonitor 성능 개선 실행 계획
 - attention / jump / status 정확도는 유지해야 한다.
 - 개선이 "운 좋게 cache hit"가 아니라 "실제 계산량 감소"로 설명되어야 한다.
 
+재현 가능한 benchmark 기준
+- ad-hoc 로그만으로는 `40-file` 수치의 의미를 방어하기 어렵다.
+- 현재 권위 있는 benchmark entrypoint는 두 개다.
+  - [scripts/bench-codex-index.mjs](/Users/jaewankim/Desktop/jaewan-develop/marmonitor/scripts/bench-codex-index.mjs)
+  - [scripts/bench-statusline-live.mjs](/Users/jaewankim/Desktop/jaewan-develop/marmonitor/scripts/bench-statusline-live.mjs)
+- 방법론과 해석 기준은 [docs/performance-benchmarking.md](/Users/jaewankim/Desktop/jaewan-develop/marmonitor/docs/performance-benchmarking.md)에 정리한다.
+- 2026-03-31 예시 측정
+  - synthetic `heavy / cold_empty_caches`: full avg `20.9ms`, light avg `4.6ms`
+  - synthetic `compact / cold_empty_caches`: full avg `5.6ms`, light avg `3.4ms`
+  - live statusline: cold `1413.3ms`, warm `66.1ms`, forced-miss `550.1ms`, `118.4ms`
+  - 측정 host: `Apple M3 Max`, `14` logical CPU, `36GB RAM`
+  - live tmux 환경: `3` sessions, `7` panes, `37` agents
+
 진행 상태
 - [완료] 1. 계측 추가
 - [완료] 2. statusline 경로 분리
@@ -112,12 +125,12 @@ marmonitor 성능 개선 실행 계획
 - 2026-03-31: 현재 샌드박스에서는 `ps` spawn EPERM 때문에 실시간 `statusline` 실행 검증이 불안정하다.
 - 2026-03-31: `statusline` phase 판정을 유지한 채 light snapshot + snapshot lock으로 refresh를 직렬화했다.
 - 2026-03-31: snapshot lock이 실패할 때는 무한 대기 대신 안전하게 폴백하도록 정리했다.
-- 2026-03-31: Codex light 인덱스는 session_meta만 읽도록 바꾸고, synthetic 40-file benchmark에서 full 1147.4ms / light 126.6ms를 확인했다.
+- 2026-03-31: Codex light 인덱스는 session_meta만 읽도록 바꾸고, 초기 ad-hoc synthetic 40-file benchmark에서 full 1147.4ms / light 126.6ms를 확인했다. 이 수치는 이후 `scripts/bench-codex-index.mjs` 기반 재현 가능한 benchmark로 대체했다.
 - 2026-03-31: Codex light/full index cache를 분리하고, file cache도 light 결과가 full 결과를 덮지 않도록 정리했다.
 - 2026-03-31: `scanAgents`는 Codex 프로세스가 있을 때만 Codex 인덱스를 만들고, cwd가 단일 매칭이면 `ps` 시작 시각 조회를 건너뛰도록 바꿨다.
 - 2026-03-31: `debug-phase`의 Codex 경로도 light 인덱스를 사용하도록 조정했다.
 - 2026-03-31: `npm run build`, `npm run lint`, `npm test` 재통과. 총 166개 테스트 통과.
-- 2026-03-31: 임시 `HOME`/`CODEX_SESSIONS`로 격리한 synthetic 40-file benchmark에서 full avg 22.2ms / light avg 15.6ms를 확인했다. 이 측정은 default Codex 경로를 제외한 isolated run이다.
+- 2026-03-31: 임시 `HOME`/`CODEX_SESSIONS`로 격리한 synthetic 40-file benchmark에서 full avg 22.2ms / light avg 15.6ms를 확인했다. 이 값도 탐색용 ad-hoc 측정이며, 현재는 `scripts/bench-codex-index.mjs` 결과를 권위 있는 기준으로 사용한다.
 - 2026-03-31: `resolveTmuxJumpTarget`는 in-flight tmux runtime snapshot을 공유하도록 바꿨다. 같은 시점의 `tmux list-panes` / `ps -eo pid=,ppid=`는 한 번만 수행한다.
 - 2026-03-31: tmux snapshot single-flight는 `tests/tmux.test.mjs`에 회귀 테스트를 추가해 고정했다.
 - 2026-03-31: `scanAgents`와 `debug-phase`는 runtime path를 1회만 계산하고 Claude / Codex session helper에 재사용하도록 바꿨다.
@@ -146,3 +159,6 @@ marmonitor 성능 개선 실행 계획
 - 2026-03-31: `npm run build`, `npm run lint`, `npm test` 재통과. 총 189개 테스트 통과.
 - 2026-03-31: 최신 head에서 실제 tmux 기준으로 다시 재실측했다. `statusline-only` shared runtime snapshot 제한 이후에도 cold `1.47s`, warm `0.05s`, forced snapshot miss `1.35s`, `1.16s`를 확인했다.
 - 2026-03-31: 같은 forced miss 구간에서 `pidusage`는 `933.5ms`, `769.1ms`, `ps-list`는 `166.6ms`, `194.3ms` 수준이었다. `lsof`, `ps_lstart`, tmux resolve/capture는 더 이상 상위 단계로 보이지 않았다.
+- 2026-03-31: `scripts/bench-codex-index.mjs`와 `scripts/bench-statusline-live.mjs`를 추가해 benchmark를 코드로 재현 가능하게 만들었다.
+- 2026-03-31: benchmark 출력에는 current/baseline commit, CPU, RAM, tmux sessions/panes, agent count, TTL을 함께 남기도록 정리했다.
+- 2026-03-31: `statusline live` benchmark는 `status --json`이 `{ system, agents }` 형태를 반환해도 agent count를 정확히 읽도록 보정했다.
