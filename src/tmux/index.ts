@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { profileAsync } from "../perf.js";
 import type { AgentSession } from "../types.js";
 
 const execFileAsync = promisify(execFile);
@@ -16,6 +17,16 @@ export interface TmuxPane {
 export interface TmuxJumpTarget {
   pane: TmuxPane;
   match: "pid-tree" | "cwd";
+}
+
+export interface TmuxRuntimeSnapshot {
+  panes: TmuxPane[];
+  childMap: Map<number, number[]>;
+}
+
+interface TmuxRuntimeSnapshotLoaders {
+  listPanes?: () => Promise<TmuxPane[]>;
+  getProcessTree?: () => Promise<Map<number, number[]>>;
 }
 
 export interface TmuxJumpResult {
@@ -111,14 +122,18 @@ export function selectTmuxPaneForAgent(
   return undefined;
 }
 
+let tmuxRuntimeSnapshotPromise: Promise<TmuxRuntimeSnapshot> | undefined;
+
 export async function listTmuxPanes(): Promise<TmuxPane[]> {
   try {
-    const { stdout } = await execFileAsync("tmux", [
-      "list-panes",
-      "-a",
-      "-F",
-      "#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_path}",
-    ]);
+    const { stdout } = await profileAsync("tmux", "list_panes", () =>
+      execFileAsync("tmux", [
+        "list-panes",
+        "-a",
+        "-F",
+        "#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_path}",
+      ]),
+    );
     return parseTmuxPanes(stdout);
   } catch {
     return [];
@@ -127,18 +142,51 @@ export async function listTmuxPanes(): Promise<TmuxPane[]> {
 
 export async function getProcessTree(): Promise<Map<number, number[]>> {
   try {
-    const { stdout } = await execFileAsync("ps", ["-eo", "pid=,ppid="]);
+    const { stdout } = await profileAsync("tmux", "process_tree", () =>
+      execFileAsync("ps", ["-eo", "pid=,ppid="]),
+    );
     return parseProcessTree(stdout);
   } catch {
     return new Map();
   }
 }
 
+export async function getTmuxRuntimeSnapshot(
+  loaders: TmuxRuntimeSnapshotLoaders = {},
+): Promise<TmuxRuntimeSnapshot> {
+  if (tmuxRuntimeSnapshotPromise) {
+    return await tmuxRuntimeSnapshotPromise;
+  }
+
+  const loadPanes = loaders.listPanes ?? listTmuxPanes;
+  const loadProcessTree = loaders.getProcessTree ?? getProcessTree;
+  const snapshotPromise = profileAsync("tmux", "resolve_snapshot", async () => {
+    const [panes, childMap] = await Promise.all([loadPanes(), loadProcessTree()]);
+    return { panes, childMap };
+  });
+  tmuxRuntimeSnapshotPromise = snapshotPromise;
+
+  try {
+    return await snapshotPromise;
+  } finally {
+    if (tmuxRuntimeSnapshotPromise === snapshotPromise) {
+      tmuxRuntimeSnapshotPromise = undefined;
+    }
+  }
+}
+
+export function resetTmuxRuntimeSnapshotForTests(): void {
+  tmuxRuntimeSnapshotPromise = undefined;
+}
+
 export async function resolveTmuxJumpTarget(
   agent: Pick<AgentSession, "pid" | "cwd">,
+  loaders: TmuxRuntimeSnapshotLoaders = {},
 ): Promise<TmuxJumpTarget | undefined> {
   try {
-    const [panes, childMap] = await Promise.all([listTmuxPanes(), getProcessTree()]);
+    const { panes, childMap } = await profileAsync("tmux", "resolve_jump_target", () =>
+      getTmuxRuntimeSnapshot(loaders),
+    );
     return selectTmuxPaneForAgent(agent, panes, childMap);
   } catch {
     return undefined;
@@ -150,14 +198,9 @@ export async function captureTmuxPaneOutput(
   lines = 30,
 ): Promise<string | undefined> {
   try {
-    const { stdout } = await execFileAsync("tmux", [
-      "capture-pane",
-      "-p",
-      "-t",
-      target.pane.target,
-      "-S",
-      `-${lines}`,
-    ]);
+    const { stdout } = await profileAsync("tmux", "capture_pane", () =>
+      execFileAsync("tmux", ["capture-pane", "-p", "-t", target.pane.target, "-S", `-${lines}`]),
+    );
     return stdout;
   } catch {
     return undefined;
@@ -169,14 +212,24 @@ export async function jumpToTmuxPane(target: TmuxJumpTarget): Promise<boolean> {
 
   try {
     if (process.env.TMUX) {
-      await execFileAsync("tmux", ["switch-client", "-t", windowTarget]);
-      await execFileAsync("tmux", ["select-window", "-t", windowTarget]);
-      await execFileAsync("tmux", ["select-pane", "-t", target.pane.target]);
+      await profileAsync("tmux", "switch_client", () =>
+        execFileAsync("tmux", ["switch-client", "-t", windowTarget]),
+      );
+      await profileAsync("tmux", "select_window", () =>
+        execFileAsync("tmux", ["select-window", "-t", windowTarget]),
+      );
+      await profileAsync("tmux", "select_pane", () =>
+        execFileAsync("tmux", ["select-pane", "-t", target.pane.target]),
+      );
       return true;
     }
 
-    await execFileAsync("tmux", ["select-window", "-t", windowTarget]);
-    await execFileAsync("tmux", ["select-pane", "-t", target.pane.target]);
+    await profileAsync("tmux", "select_window", () =>
+      execFileAsync("tmux", ["select-window", "-t", windowTarget]),
+    );
+    await profileAsync("tmux", "select_pane", () =>
+      execFileAsync("tmux", ["select-pane", "-t", target.pane.target]),
+    );
     return true;
   } catch {
     return false;

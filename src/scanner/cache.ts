@@ -82,6 +82,7 @@ export const claudeProjectDirCache = new BoundedMap<string, string>(64);
 export const claudeTokenCache = new BoundedMap<string, FileTokenCacheEntry>(64);
 export const claudePhaseCache = new BoundedMap<string, PhaseCacheEntry>(64);
 export const codexPhaseCache = new BoundedMap<string, PhaseCacheEntry>(64);
+export const geminiProjectDirCache = new BoundedMap<string, string>(64);
 export const codexSessionFileCache = new BoundedMap<
   string,
   CodexSessionMeta & { mtimeMs?: number; size?: number }
@@ -95,13 +96,24 @@ export const sessionEnrichmentCache = new BoundedMap<string, Partial<AgentSessio
 
 // ─── Codex Index Cache ─────────────────────────────────────────────
 
-export let codexIndexCache:
-  | {
-      builtAt: number;
-      sessions: CodexSessionMeta[];
-    }
-  | undefined;
+export interface CodexIndexCacheEntry {
+  builtAt: number;
+  sessions: CodexSessionMeta[];
+}
 
-export function setCodexIndexCache(value: typeof codexIndexCache): void {
-  codexIndexCache = value;
+export const codexIndexCache = {
+  full: undefined as CodexIndexCacheEntry | undefined,
+  light: undefined as CodexIndexCacheEntry | undefined,
+};
+
+export function setCodexIndexCache(
+  value:
+    | {
+        full?: CodexIndexCacheEntry;
+        light?: CodexIndexCacheEntry;
+      }
+    | undefined,
+): void {
+  codexIndexCache.full = value?.full;
+  codexIndexCache.light = value?.light;
 }

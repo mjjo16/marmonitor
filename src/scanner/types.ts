@@ -4,4 +4,6 @@
 
 export interface ScanOptions {
   enrichmentMode?: "full" | "light";
+  includeTokenUsage?: boolean;
+  includeStdoutHeuristic?: boolean;
 }

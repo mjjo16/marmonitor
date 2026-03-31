@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 import type { MarmonitorConfig } from "../config/index.js";
+import { profileAsync } from "../perf.js";
 import type { RuntimeSource } from "../types.js";
 import {
   PROCESS_CWD_TTL_MS,
@@ -13,32 +14,71 @@ import {
   processCwdCache,
   processStartCache,
 } from "./cache.js";
+import { readSharedCache, writeSharedCache } from "./shared-cache.js";
 
 export const execFileAsync = promisify(execFile);
 
+interface ProcessCwdOptions {
+  cacheRoot?: string;
+  nowMs?: number;
+  execFile?: typeof execFileAsync;
+}
+
 /** Get process cwd via lsof (fallback for non-Claude agents) */
-export async function getProcessCwd(pid: number): Promise<string | undefined> {
+export async function getProcessCwd(
+  pid: number,
+  options: ProcessCwdOptions = {},
+): Promise<string | undefined> {
+  const nowMs = options.nowMs ?? Date.now();
   const cached = processCwdCache.get(pid);
-  if (cached && Date.now() - cached.checkedAt < PROCESS_CWD_TTL_MS) {
+  if (cached && nowMs - cached.checkedAt < PROCESS_CWD_TTL_MS) {
     return cached.cwd;
   }
 
-  try {
-    const { stdout } = await execFileAsync("lsof", ["-p", String(pid), "-Fn"], {
-      encoding: "utf-8",
-      timeout: 3000,
+  const sharedCached = await readSharedCache<string | undefined>(
+    "process-cwd",
+    String(pid),
+    PROCESS_CWD_TTL_MS,
+    {
+      cacheRoot: options.cacheRoot,
+      nowMs,
+    },
+  );
+  if (sharedCached) {
+    processCwdCache.set(pid, {
+      checkedAt: sharedCached.checkedAt,
+      cwd: sharedCached.value,
     });
+    return sharedCached.value;
+  }
+
+  const runExecFile = options.execFile ?? execFileAsync;
+  try {
+    const { stdout } = await profileAsync("process", "lsof", () =>
+      runExecFile("lsof", ["-a", "-d", "cwd", "-p", String(pid), "-Fn"], {
+        encoding: "utf-8",
+        timeout: 3000,
+      }),
+    );
     const match = stdout.split("\n").find((line) => line.startsWith("n/"));
     const cwd = match ? match.slice(1) : undefined;
     processCwdCache.set(pid, {
-      checkedAt: Date.now(),
+      checkedAt: nowMs,
       cwd,
+    });
+    await writeSharedCache("process-cwd", String(pid), cwd, {
+      cacheRoot: options.cacheRoot,
+      nowMs,
     });
     return cwd;
   } catch {
     processCwdCache.set(pid, {
-      checkedAt: Date.now(),
+      checkedAt: nowMs,
       cwd: undefined,
+    });
+    await writeSharedCache("process-cwd", String(pid), undefined, {
+      cacheRoot: options.cacheRoot,
+      nowMs,
     });
     return undefined;
   }
@@ -51,10 +91,12 @@ export async function getProcessStartTime(pid: number): Promise<number | undefin
   }
 
   try {
-    const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], {
-      encoding: "utf-8",
-      timeout: 2000,
-    });
+    const { stdout } = await profileAsync("process", "ps_lstart", () =>
+      execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], {
+        encoding: "utf-8",
+        timeout: 2000,
+      }),
+    );
     const trimmed = stdout.trim();
     const startedAt = trimmed ? new Date(trimmed).getTime() / 1000 : undefined;
     processStartCache.set(pid, {

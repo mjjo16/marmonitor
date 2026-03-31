@@ -6,12 +6,13 @@
  * and determines activity status.
  */
 
-import { existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import pidusage from "pidusage";
 import psList from "ps-list";
 import type { MarmonitorConfig } from "../config/index.js";
+import { resolveRuntimeDataPaths } from "../config/index.js";
+import { profileAsync } from "../perf.js";
 import type { AgentSession, SessionPhase, TokenUsage } from "../types.js";
 
 // ─── Re-exports (public API) ──────────────────────────────────────
@@ -23,6 +24,7 @@ export { parseGeminiSessionContent } from "./gemini.js";
 
 // ─── Internal imports ─────────────────────────────────────────────
 
+import { selectCodexSession } from "../output/utils.js";
 import { sessionEnrichmentCache } from "./cache.js";
 import {
   detectClaudePhase,
@@ -30,7 +32,8 @@ import {
   parseClaudeSession,
   parseClaudeTokens,
 } from "./claude.js";
-import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./codex.js";
+import { detectCodexPhase, indexCodexSessions } from "./codex.js";
+import type { CodexSessionMeta } from "./codex.js";
 import { parseGeminiSession } from "./gemini.js";
 import { groupByParent } from "./group.js";
 import {
@@ -52,10 +55,12 @@ export async function scanAgents(
 ): Promise<AgentSession[]> {
   const enrichmentMode = options.enrichmentMode ?? "full";
   const isFullEnrichment = enrichmentMode === "full";
+  const includeTokenUsage = options.includeTokenUsage ?? isFullEnrichment;
+  const includeStdoutHeuristic = options.includeStdoutHeuristic ?? isFullEnrichment;
   const seenPids = new Set<number>();
 
   // 1. Find running processes
-  const processes = await psList();
+  const processes = await profileAsync("scanAgents", "ps_list", () => psList());
 
   // Filter to agent processes
   const agentProcesses: Array<{ proc: (typeof processes)[0]; agentName: string }> = [];
@@ -67,17 +72,41 @@ export async function scanAgents(
     agentProcesses.push({ proc, agentName });
   }
 
+  if (agentProcesses.length === 0 && !config.display.showDead) {
+    return [];
+  }
+
+  const runtimePaths = resolveRuntimeDataPaths(config);
+
   // 2. Batch pidusage
   const pids = agentProcesses.map((a) => a.proc.pid);
   let usageMap: Record<number, { cpu: number; memory: number }> = {};
-  try {
-    usageMap = await pidusage(pids);
-  } catch {
-    // some PIDs may have exited
+  if (pids.length > 0) {
+    try {
+      usageMap = await profileAsync("scanAgents", "pidusage", () => pidusage(pids));
+    } catch {
+      // some PIDs may have exited
+    }
   }
 
   // 3. Pre-index Codex sessions (once, shared across all Codex processes)
-  const codexSessions = isFullEnrichment ? await indexCodexSessions(config) : [];
+  const codexProcesses = agentProcesses.filter((a) => a.agentName === "Codex");
+  let codexSessions: CodexSessionMeta[] = [];
+  let codexSessionsByCwd: Map<string, CodexSessionMeta[]> | undefined;
+  if (codexProcesses.length > 0) {
+    codexSessions = await profileAsync("scanAgents", "codex_index", () =>
+      indexCodexSessions(config, { includeTokenUsage, runtimePaths }),
+    );
+    codexSessionsByCwd = new Map();
+    for (const session of codexSessions) {
+      const list = codexSessionsByCwd.get(session.cwd);
+      if (list) {
+        list.push(session);
+      } else {
+        codexSessionsByCwd.set(session.cwd, [session]);
+      }
+    }
+  }
 
   // 4. Build sessions with enrichment (parallel)
   const sessionPromises = agentProcesses.map(async ({ proc, agentName }) => {
@@ -113,7 +142,10 @@ export async function scanAgents(
       lastResponseAt = cachedEnrichment.lastResponseAt;
       lastActivityAt = cachedEnrichment.lastActivityAt;
     } else if (agentName === "Claude Code") {
-      const claudeData = await parseClaudeSession(proc.pid, config);
+      const claudeData = await parseClaudeSession(proc.pid, config, {
+        includeTokenUsage,
+        runtimePaths,
+      });
       if (claudeData.cwd) cwd = claudeData.cwd;
       if (cwd === "unknown") cwd = (await getProcessCwd(proc.pid)) ?? "unknown";
       sessionId = claudeData.sessionId;
@@ -124,16 +156,27 @@ export async function scanAgents(
       lastActivityAt = claudeData.lastActivityAt;
 
       if (sessionId && cwd) {
-        const phaseResult = await detectClaudePhase(sessionId, cwd, startedAt, config);
+        const phaseResult = await detectClaudePhase(
+          sessionId,
+          cwd,
+          startedAt,
+          config,
+          runtimePaths,
+        );
         phase = phaseResult.phase;
         lastResponseAt = phaseResult.lastResponseAt;
         lastActivityAt = phaseResult.lastActivityAt ?? lastActivityAt;
       }
     } else if (agentName === "Codex") {
       cwd = cachedEnrichment?.cwd ?? (await getProcessCwd(proc.pid)) ?? "unknown";
-      const processStartTime = await getProcessStartTime(proc.pid);
-
-      const matched = matchCodexSession(cwd, processStartTime, codexSessions);
+      const cwdMatches = codexSessionsByCwd?.get(cwd) ?? [];
+      let matched: CodexSessionMeta | undefined;
+      if (cwdMatches.length === 1) {
+        matched = cwdMatches[0];
+      } else if (cwdMatches.length > 1) {
+        const processStartTime = await getProcessStartTime(proc.pid);
+        matched = selectCodexSession(cwd, processStartTime, cwdMatches);
+      }
       if (matched) {
         sessionMatched = true;
         sessionId = matched.id;
@@ -154,12 +197,14 @@ export async function scanAgents(
 
       // Detect phase from session JSONL
       phase = await detectCodexPhase(codexSessionFile, config);
-      if (phase !== "permission" && runtimeSource === "cli") {
+      if (includeStdoutHeuristic && phase !== "permission" && runtimeSource === "cli") {
         phase = (await detectCliStdoutPhase({ pid: proc.pid, cwd }, config)) ?? phase;
       }
     } else if (agentName === "Gemini") {
       cwd = cachedEnrichment?.cwd ?? (await getProcessCwd(proc.pid)) ?? "unknown";
-      const geminiData = await parseGeminiSession(cwd);
+      const geminiData = await parseGeminiSession(cwd, {
+        includeTokenUsage,
+      });
       startedAt = geminiData.startedAt ?? (await getProcessStartTime(proc.pid));
       sessionId = geminiData.sessionId;
       tokenUsage = geminiData.tokenUsage;
@@ -168,7 +213,7 @@ export async function scanAgents(
       lastResponseAt = geminiData.lastResponseAt;
       lastActivityAt = geminiData.lastActivityAt;
       sessionMatched = geminiData.sessionMatched ?? true;
-      if (phase !== "permission") {
+      if (includeStdoutHeuristic && phase !== "permission") {
         phase = (await detectCliStdoutPhase({ pid: proc.pid, cwd }, config)) ?? phase;
       }
     }
@@ -218,13 +263,14 @@ export async function scanAgents(
     return session;
   });
 
-  const results = await Promise.all(sessionPromises);
+  const results = await profileAsync("scanAgents", "build_sessions", () =>
+    Promise.all(sessionPromises),
+  );
   const sessions: AgentSession[] = results.filter((s): s is AgentSession => s !== null);
 
   // 5. Check for dead sessions (Claude: session file exists but process gone)
   if (config.display.showDead) {
-    for (const claudeSessionDir of getClaudeSessionRoots(config)) {
-      if (!existsSync(claudeSessionDir)) continue;
+    for (const claudeSessionDir of getClaudeSessionRoots(config, runtimePaths)) {
       try {
         const files = await readdir(claudeSessionDir);
         for (const file of files) {
@@ -247,6 +293,7 @@ export async function scanAgents(
                 data.cwd,
                 undefined,
                 config,
+                runtimePaths,
               );
               tokenUsage = tokenData.tokenUsage;
               model = tokenData.model;

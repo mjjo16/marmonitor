@@ -10,6 +10,7 @@ import {
   getDefaultConfigPath,
   loadConfig,
   resolveConfigPath as resolveLoadedConfigPath,
+  resolveRuntimeDataPaths,
 } from "./config/index.js";
 import { evaluateGuard, formatGuardOutput, parseHookEvent, readStdin } from "./guard/index.js";
 import {
@@ -28,12 +29,19 @@ import {
   renderUnavailableStatusline,
 } from "./output/index.js";
 import { selectJumpAttentionItem, selectUnmatchedTargets } from "./output/utils.js";
+import { profileAsync } from "./perf.js";
 import { TERMINAL_RESTORE_SEQUENCE, formatProcessFailure } from "./process-safety.js";
 import { detectClaudePhase } from "./scanner/claude.js";
 import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./scanner/codex.js";
 import { parseGeminiSession } from "./scanner/gemini.js";
 import { scanAgents } from "./scanner/index.js";
 import { detectCliStdoutPhase } from "./scanner/status.js";
+import {
+  acquireSnapshotRefreshLock,
+  releaseSnapshotRefreshLock,
+  snapshotCacheFile,
+  statuslineCacheFile,
+} from "./snapshot-cache.js";
 import { captureTmuxPaneOutput, jumpToAgent, resolveTmuxJumpTarget } from "./tmux/index.js";
 import type { AgentSession } from "./types.js";
 import { VERSION } from "./version.js";
@@ -456,18 +464,7 @@ function resolveAttentionLimit(
   return Math.min(Math.max(Math.floor(fallback), 1), 10);
 }
 
-function statuslineCacheFile(format: string, attentionLimit: number, width?: number): string {
-  const widthKey = width && width > 0 ? String(width) : "auto";
-  return join(tmpdir(), "marmonitor", `statusline-${format}-${attentionLimit}-${widthKey}.txt`);
-}
-
-function snapshotCacheFile(enrichmentMode: "full" | "light", showDead: boolean): string {
-  return join(
-    tmpdir(),
-    "marmonitor",
-    `snapshot-${enrichmentMode}-${showDead ? "dead" : "alive"}.json`,
-  );
-}
+const SNAPSHOT_LOCK_POLL_MS = 150;
 
 async function readCachedStatusline(
   format: string,
@@ -475,14 +472,16 @@ async function readCachedStatusline(
   width: number | undefined,
   ttlMs: number,
 ): Promise<string | undefined> {
-  const path = statuslineCacheFile(format, attentionLimit, width);
-  try {
-    const fileStat = await stat(path);
-    if (Date.now() - fileStat.mtimeMs > ttlMs) return undefined;
-    return (await readFile(path, "utf-8")).trimEnd();
-  } catch {
-    return undefined;
-  }
+  return await profileAsync("cli", "readCachedStatusline", async () => {
+    const path = statuslineCacheFile(format, attentionLimit, width);
+    try {
+      const fileStat = await stat(path);
+      if (Date.now() - fileStat.mtimeMs > ttlMs) return undefined;
+      return (await readFile(path, "utf-8")).trimEnd();
+    } catch {
+      return undefined;
+    }
+  });
 }
 
 async function writeCachedStatusline(
@@ -491,13 +490,15 @@ async function writeCachedStatusline(
   width: number | undefined,
   value: string,
 ): Promise<void> {
-  const path = statuslineCacheFile(format, attentionLimit, width);
-  try {
-    await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
-    await writeFile(path, value, "utf-8");
-  } catch {
-    // cache failures must never break statusline rendering
-  }
+  await profileAsync("cli", "writeCachedStatusline", async () => {
+    const path = statuslineCacheFile(format, attentionLimit, width);
+    try {
+      await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
+      await writeFile(path, value, "utf-8");
+    } catch {
+      // cache failures must never break statusline rendering
+    }
+  });
 }
 
 async function readCachedSnapshot(
@@ -505,14 +506,16 @@ async function readCachedSnapshot(
   showDead: boolean,
   ttlMs: number,
 ): Promise<AgentSession[] | undefined> {
-  const path = snapshotCacheFile(enrichmentMode, showDead);
-  try {
-    const fileStat = await stat(path);
-    if (Date.now() - fileStat.mtimeMs > ttlMs) return undefined;
-    return JSON.parse(await readFile(path, "utf-8")) as AgentSession[];
-  } catch {
-    return undefined;
-  }
+  return await profileAsync("snapshot", "readCachedSnapshot", async () => {
+    const path = snapshotCacheFile(enrichmentMode, showDead);
+    try {
+      const fileStat = await stat(path);
+      if (Date.now() - fileStat.mtimeMs > ttlMs) return undefined;
+      return JSON.parse(await readFile(path, "utf-8")) as AgentSession[];
+    } catch {
+      return undefined;
+    }
+  });
 }
 
 async function writeCachedSnapshot(
@@ -520,33 +523,77 @@ async function writeCachedSnapshot(
   showDead: boolean,
   agents: AgentSession[],
 ): Promise<void> {
-  const path = snapshotCacheFile(enrichmentMode, showDead);
-  try {
-    await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
-    await writeFile(path, JSON.stringify(agents), "utf-8");
-  } catch {
-    // snapshot cache failures must never break command execution
-  }
+  await profileAsync("snapshot", "writeCachedSnapshot", async () => {
+    const path = snapshotCacheFile(enrichmentMode, showDead);
+    try {
+      await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
+      await writeFile(path, JSON.stringify(agents), "utf-8");
+    } catch {
+      // snapshot cache failures must never break command execution
+    }
+  });
 }
 
 async function getAgentsSnapshot(
   config: Awaited<ReturnType<typeof loadConfig>>,
-  options: { enrichmentMode?: "full" | "light"; ttlMs?: number } = {},
+  options: {
+    enrichmentMode?: "full" | "light";
+    ttlMs?: number;
+    includeTokenUsage?: boolean;
+    includeStdoutHeuristic?: boolean;
+  } = {},
 ): Promise<AgentSession[]> {
   const enrichmentMode = options.enrichmentMode ?? "full";
   const ttlMs = options.ttlMs ?? config.performance.snapshotTtlMs;
   const useCache = ttlMs > 0;
 
-  if (useCache) {
-    const cached = await readCachedSnapshot(enrichmentMode, config.display.showDead, ttlMs);
-    if (cached) return cached;
-  }
+  return await profileAsync("snapshot", "getAgentsSnapshot", async () => {
+    if (useCache) {
+      const cached = await readCachedSnapshot(enrichmentMode, config.display.showDead, ttlMs);
+      if (cached) return cached;
+    }
 
-  const agents = await scanAgents(config, { enrichmentMode });
-  if (useCache) {
-    await writeCachedSnapshot(enrichmentMode, config.display.showDead, agents);
-  }
-  return agents;
+    let acquired = !useCache;
+    let lockUnavailable = false;
+    while (useCache && !acquired && !lockUnavailable) {
+      const cached = await readCachedSnapshot(enrichmentMode, config.display.showDead, ttlMs);
+      if (cached) return cached;
+
+      try {
+        acquired = await profileAsync("snapshot", "acquireSnapshotRefreshLock", () =>
+          acquireSnapshotRefreshLock(enrichmentMode, config.display.showDead),
+        );
+      } catch {
+        lockUnavailable = true;
+      }
+      if (!acquired) {
+        await sleep(SNAPSHOT_LOCK_POLL_MS);
+      }
+    }
+
+    try {
+      if (useCache) {
+        const cached = await readCachedSnapshot(enrichmentMode, config.display.showDead, ttlMs);
+        if (cached) return cached;
+      }
+
+      const agents = await profileAsync("snapshot", "scanAgents", () =>
+        scanAgents(config, {
+          enrichmentMode,
+          includeTokenUsage: options.includeTokenUsage,
+          includeStdoutHeuristic: options.includeStdoutHeuristic,
+        }),
+      );
+      if (useCache) {
+        await writeCachedSnapshot(enrichmentMode, config.display.showDead, agents);
+      }
+      return agents;
+    } finally {
+      if (useCache && acquired) {
+        await releaseSnapshotRefreshLock(enrichmentMode, config.display.showDead);
+      }
+    }
+  });
 }
 
 program
@@ -583,7 +630,10 @@ program
           console.log(cached);
           return;
         }
-        const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
+        const agents = await getAgentsSnapshot(config, {
+          enrichmentMode: "light",
+          includeStdoutHeuristic: true,
+        });
         const rendered = await renderStatusline(
           agents,
           opts.statuslineFormat,
@@ -641,7 +691,10 @@ program
   .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
     const config = await loadConfig(resolveConfigPath(opts));
-    const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
+    const agents = await getAgentsSnapshot(config, {
+      enrichmentMode: "light",
+      includeStdoutHeuristic: true,
+    });
     const limit = resolveAttentionLimit(opts, config.display.attentionLimit);
     const interactiveLimit = resolveAttentionLimit(opts, config.display.attentionLimit, true);
     if (opts.interactive && opts.json) {
@@ -715,10 +768,14 @@ program
 
     const lines = Math.max(Number.parseInt(opts.lines, 10) || 40, 10);
     const config = await loadConfig(resolveConfigPath(opts));
+    const runtimePaths = resolveRuntimeDataPaths(config);
 
     let agents: AgentSession[];
     try {
-      agents = await scanAgents(config, { enrichmentMode: "full" });
+      agents = await scanAgents(config, {
+        enrichmentMode: "light",
+        includeStdoutHeuristic: true,
+      });
     } catch (error) {
       const payload = {
         found: false,
@@ -761,7 +818,10 @@ program
       sessionLastActivityAt = gemini.lastActivityAt;
       sessionLastResponseAt = gemini.lastResponseAt;
     } else if (agent.agentName === "Codex") {
-      const codexSessions = await indexCodexSessions(config);
+      const codexSessions = await indexCodexSessions(config, {
+        includeTokenUsage: false,
+        runtimePaths,
+      });
       const matched = matchCodexSession(agent.cwd, agent.startedAt, codexSessions);
       sessionPhase = await detectCodexPhase(matched?.filePath, config);
       sessionSourceFile = matched?.filePath;
@@ -771,6 +831,7 @@ program
         agent.cwd,
         agent.startedAt,
         config,
+        runtimePaths,
       );
       sessionPhase = phaseResult.phase;
       sessionLastActivityAt = phaseResult.lastActivityAt;
@@ -832,7 +893,10 @@ program
   .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
     const config = await loadConfig(resolveConfigPath(opts));
-    const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
+    const agents = await getAgentsSnapshot(config, {
+      enrichmentMode: "light",
+      includeStdoutHeuristic: true,
+    });
     const useAttention = Boolean(opts.attention);
     const useAttentionIndex = typeof opts.attentionIndex === "string";
     const usePid = typeof opts.pid === "string";
@@ -928,6 +992,7 @@ program
       const needsHeavy = lastHeavyAt === 0 || now - lastHeavyAt >= detailMs;
       const agents = await scanAgents(config, {
         enrichmentMode: needsHeavy ? "full" : "light",
+        includeStdoutHeuristic: true,
       });
       if (needsHeavy) lastHeavyAt = now;
       clearScreen();
@@ -963,6 +1028,7 @@ program
       const needsHeavy = lastHeavyAt === 0 || now - lastHeavyAt >= detailIntervalMs;
       const agents = await scanAgents(config, {
         enrichmentMode: needsHeavy ? "full" : "light",
+        includeStdoutHeuristic: true,
       });
       if (needsHeavy) lastHeavyAt = now;
       clearScreen();
@@ -984,7 +1050,10 @@ program
   .option("--pid <pid...>", "Only include specific unmatched PID(s)")
   .action(async (opts) => {
     const config = await loadConfig(resolveConfigPath(opts));
-    const agents = await scanAgents(config);
+    const agents = await scanAgents(config, {
+      enrichmentMode: "light",
+      includeStdoutHeuristic: true,
+    });
     const selectedPids = Array.isArray(opts.pid)
       ? opts.pid
           .map((value: string) => Number.parseInt(value, 10))

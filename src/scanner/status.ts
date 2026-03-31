@@ -4,9 +4,18 @@
 
 import type { MarmonitorConfig } from "../config/index.js";
 import { detectApprovalPromptPhase } from "../output/utils.js";
+import { profileAsync } from "../perf.js";
 import { captureTmuxPaneOutput, resolveTmuxJumpTarget } from "../tmux/index.js";
 import type { AgentSession, SessionPhase, SessionStatus } from "../types.js";
 import { RECENT_ACTIVITY_ACTIVE_SEC, stdoutHeuristicCache } from "./cache.js";
+import { readSharedCache, writeSharedCache } from "./shared-cache.js";
+
+interface StdoutPhaseDetectionOptions {
+  cacheRoot?: string;
+  nowMs?: number;
+  resolveTmuxJumpTarget?: typeof resolveTmuxJumpTarget;
+  captureTmuxPaneOutput?: typeof captureTmuxPaneOutput;
+}
 
 /** Determine agent activity status */
 export function determineStatus(
@@ -42,26 +51,59 @@ export function determineStatus(
 export async function detectCliStdoutPhase(
   agent: Pick<AgentSession, "pid" | "cwd">,
   config: MarmonitorConfig,
+  options: StdoutPhaseDetectionOptions = {},
 ): Promise<SessionPhase> {
-  const cached = stdoutHeuristicCache.get(agent.pid);
-  if (cached && Date.now() - cached.checkedAt < config.performance.stdoutHeuristicTtlMs) {
-    return cached.phase;
-  }
+  return await profileAsync("stdout_heuristic", "detectCliStdoutPhase", async () => {
+    const nowMs = options.nowMs ?? Date.now();
+    const cached = stdoutHeuristicCache.get(agent.pid);
+    if (cached && nowMs - cached.checkedAt < config.performance.stdoutHeuristicTtlMs) {
+      return cached.phase;
+    }
 
-  const target = await resolveTmuxJumpTarget(agent);
-  if (!target) {
-    stdoutHeuristicCache.set(agent.pid, { checkedAt: Date.now(), phase: undefined });
-    return undefined;
-  }
+    const sharedKey = `${agent.pid}:${agent.cwd}`;
+    const sharedCached = await readSharedCache<SessionPhase>(
+      "stdout-heuristic",
+      sharedKey,
+      config.performance.stdoutHeuristicTtlMs,
+      {
+        cacheRoot: options.cacheRoot,
+        nowMs,
+      },
+    );
+    if (sharedCached) {
+      stdoutHeuristicCache.set(agent.pid, {
+        checkedAt: sharedCached.checkedAt,
+        phase: sharedCached.value,
+      });
+      return sharedCached.value;
+    }
 
-  const output = await captureTmuxPaneOutput(target, 30);
-  const phase = output
-    ? detectApprovalPromptPhase(
-        output,
-        config.status.stdoutHeuristic.approvalPatterns,
-        config.status.stdoutHeuristic.clearPatterns,
-      )
-    : undefined;
-  stdoutHeuristicCache.set(agent.pid, { checkedAt: Date.now(), phase });
-  return phase;
+    const resolveTarget = options.resolveTmuxJumpTarget ?? resolveTmuxJumpTarget;
+    const captureOutput = options.captureTmuxPaneOutput ?? captureTmuxPaneOutput;
+
+    const target = await resolveTarget(agent);
+    if (!target) {
+      stdoutHeuristicCache.set(agent.pid, { checkedAt: nowMs, phase: undefined });
+      await writeSharedCache("stdout-heuristic", sharedKey, undefined, {
+        cacheRoot: options.cacheRoot,
+        nowMs,
+      });
+      return undefined;
+    }
+
+    const output = await captureOutput(target, 30);
+    const phase = output
+      ? detectApprovalPromptPhase(
+          output,
+          config.status.stdoutHeuristic.approvalPatterns,
+          config.status.stdoutHeuristic.clearPatterns,
+        )
+      : undefined;
+    stdoutHeuristicCache.set(agent.pid, { checkedAt: nowMs, phase });
+    await writeSharedCache("stdout-heuristic", sharedKey, phase, {
+      cacheRoot: options.cacheRoot,
+      nowMs,
+    });
+    return phase;
+  });
 }

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { getDefaults } from "../dist/config/index.js";
 import {
@@ -11,6 +13,7 @@ import {
 } from "../dist/guard/index.js";
 
 const execFileAsync = promisify(execFile);
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 describe("parseHookEvent", () => {
   it("parses Claude hook payload", () => {
@@ -151,7 +154,7 @@ describe("formatGuardOutput", () => {
 describe("guard CLI fail-open", () => {
   it("returns allow for malformed stdin payload", async () => {
     const { stdout } = await execFileAsync("node", ["bin/marmonitor.js", "guard"], {
-      cwd: "/Users/macrent/Documents/mjjo/marmonitor",
+      cwd: repoRoot,
       input: "{not-json",
     });
     assert.equal(stdout.trim(), '{"decision":"allow"}');

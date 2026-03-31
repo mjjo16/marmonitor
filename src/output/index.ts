@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import * as si from "systeminformation";
+import { profileAsync } from "../perf.js";
 import type { TmuxJumpResult } from "../tmux/index.js";
 import type {
   AgentSession,
@@ -25,20 +26,22 @@ import {
 
 /** Collect system resource info */
 export async function getSystemInfo(): Promise<SystemInfo> {
-  const [cpu, mem, battery] = await Promise.all([si.currentLoad(), si.mem(), si.battery()]);
+  return await profileAsync("output", "getSystemInfo", async () => {
+    const [cpu, mem, battery] = await Promise.all([si.currentLoad(), si.mem(), si.battery()]);
 
-  const info: SystemInfo = {
-    cpuPercent: Math.round(cpu.currentLoad * 10) / 10,
-    memoryUsedGb: Math.round((mem.used / 1024 ** 3) * 10) / 10,
-    memoryTotalGb: Math.round(mem.total / 1024 ** 3),
-  };
+    const info: SystemInfo = {
+      cpuPercent: Math.round(cpu.currentLoad * 10) / 10,
+      memoryUsedGb: Math.round((mem.used / 1024 ** 3) * 10) / 10,
+      memoryTotalGb: Math.round(mem.total / 1024 ** 3),
+    };
 
-  if (battery.hasBattery) {
-    info.batteryPercent = battery.percent;
-    info.batteryCharging = battery.isCharging;
-  }
+    if (battery.hasBattery) {
+      info.batteryPercent = battery.percent;
+      info.batteryCharging = battery.isCharging;
+    }
 
-  return info;
+    return info;
+  });
 }
 
 // shortenPath, formatElapsed, formatTokens imported from ./utils.js
@@ -506,55 +509,57 @@ export async function renderStatusline(
   attentionLimit = 5,
   width?: number,
 ): Promise<string> {
-  const alive = agents.filter((a) => a.status !== "Dead" && a.status !== "Unmatched");
-  const unmatched = agents.filter((a) => a.status === "Unmatched");
+  return await profileAsync("output", "renderStatusline", async () => {
+    const alive = agents.filter((a) => a.status !== "Dead" && a.status !== "Unmatched");
+    const unmatched = agents.filter((a) => a.status === "Unmatched");
 
-  if (alive.length === 0) {
-    return format === "wezterm-pills" ? renderUnavailableStatusline(format) : "AI:0";
-  }
+    if (alive.length === 0) {
+      return format === "wezterm-pills" ? renderUnavailableStatusline(format) : "AI:0";
+    }
 
-  const sys = await getSystemInfo();
-  const waitingCount = alive.filter((a) => a.phase === "permission").length;
-  const stalledCount = alive.filter((a) => a.status === "Stalled").length;
-  const activeCount = alive.filter((a) => a.status === "Active").length;
-  const highCpuCount = alive.filter((a) => a.cpuPercent >= 10).length;
-  const thinkingCount = alive.filter((a) => a.phase === "thinking").length;
-  const toolCount = alive.filter((a) => a.phase === "tool").length;
-  const claudeCount = alive.filter((a) => a.agentName === "Claude Code").length;
-  const codexCount = alive.filter((a) => a.agentName === "Codex").length;
-  const geminiCount = alive.filter((a) => a.agentName === "Gemini").length;
-  const snapshot = {
-    aliveCount: alive.length,
-    waitingCount,
-    riskCount: 0,
-    stalledCount,
-    unmatchedCount: unmatched.length,
-    activeCount,
-    highCpuCount,
-    thinkingCount,
-    toolCount,
-    claudeCount,
-    codexCount,
-    geminiCount,
-    cpuPercent: sys.cpuPercent,
-    memoryUsedGb: sys.memoryUsedGb,
-  };
+    const sys = await getSystemInfo();
+    const waitingCount = alive.filter((a) => a.phase === "permission").length;
+    const stalledCount = alive.filter((a) => a.status === "Stalled").length;
+    const activeCount = alive.filter((a) => a.status === "Active").length;
+    const highCpuCount = alive.filter((a) => a.cpuPercent >= 10).length;
+    const thinkingCount = alive.filter((a) => a.phase === "thinking").length;
+    const toolCount = alive.filter((a) => a.phase === "tool").length;
+    const claudeCount = alive.filter((a) => a.agentName === "Claude Code").length;
+    const codexCount = alive.filter((a) => a.agentName === "Codex").length;
+    const geminiCount = alive.filter((a) => a.agentName === "Gemini").length;
+    const snapshot = {
+      aliveCount: alive.length,
+      waitingCount,
+      riskCount: 0,
+      stalledCount,
+      unmatchedCount: unmatched.length,
+      activeCount,
+      highCpuCount,
+      thinkingCount,
+      toolCount,
+      claudeCount,
+      codexCount,
+      geminiCount,
+      cpuPercent: sys.cpuPercent,
+      memoryUsedGb: sys.memoryUsedGb,
+    };
 
-  if (format === "tmux-badges") {
-    const focusText = buildTmuxAttentionPills(
-      buildJumpAttentionItems(agents),
-      attentionLimit,
-      width,
-    );
-    return buildTmuxBadgeBar(snapshot, focusText);
-  }
+    if (format === "tmux-badges") {
+      const focusText = buildTmuxAttentionPills(
+        buildJumpAttentionItems(agents),
+        attentionLimit,
+        width,
+      );
+      return buildTmuxBadgeBar(snapshot, focusText);
+    }
 
-  if (format === "wezterm-pills") {
-    const focusText = buildAttentionFocusText(buildAttentionItems(agents), attentionLimit, width);
-    return serializeWeztermPills(snapshot, focusText);
-  }
+    if (format === "wezterm-pills") {
+      const focusText = buildAttentionFocusText(buildAttentionItems(agents), attentionLimit, width);
+      return serializeWeztermPills(snapshot, focusText);
+    }
 
-  return buildStatuslineSummary(snapshot, format);
+    return buildStatuslineSummary(snapshot, format);
+  });
 }
 
 /** Print one-line summary for tmux/terminal status bar */

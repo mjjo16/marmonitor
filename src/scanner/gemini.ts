@@ -2,12 +2,12 @@
  * Gemini session parsing and phase detection.
  */
 
-import { existsSync } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
+import { profileAsync } from "../perf.js";
 import type { AgentSession, SessionPhase, TokenUsage } from "../types.js";
-import { HOME } from "./cache.js";
+import { HOME, geminiProjectDirCache } from "./cache.js";
 
 export interface GeminiSessionMeta {
   filePath: string;
@@ -19,6 +19,11 @@ export interface GeminiSessionMeta {
   tokenUsage?: TokenUsage;
   model?: string;
   phase?: SessionPhase;
+}
+
+interface GeminiParseOptions {
+  includeTokenUsage?: boolean;
+  tmpRoot?: string;
 }
 
 type GeminiMessage = {
@@ -40,7 +45,11 @@ export function toEpochSec(value: string | undefined): number | undefined {
   return Number.isNaN(parsed) ? undefined : parsed / 1000;
 }
 
-export function parseGeminiSessionContent(raw: string): Partial<GeminiSessionMeta> {
+export function parseGeminiSessionContent(
+  raw: string,
+  options: GeminiParseOptions = {},
+): Partial<GeminiSessionMeta> {
+  const includeTokenUsage = options.includeTokenUsage !== false;
   try {
     const data = JSON.parse(raw);
     const messages = Array.isArray(data.messages)
@@ -71,16 +80,17 @@ export function parseGeminiSessionContent(raw: string): Partial<GeminiSessionMet
       startedAt: toEpochSec(data.startTime),
       lastActivityAt,
       lastResponseAt,
-      model: latestGeminiMessage?.model,
-      tokenUsage: latestGeminiMessage?.tokens
-        ? {
-            inputTokens: latestGeminiMessage.tokens.input ?? 0,
-            outputTokens: latestGeminiMessage.tokens.output ?? 0,
-            cacheCreationTokens: 0,
-            cacheReadTokens: latestGeminiMessage.tokens.cached ?? 0,
-            totalTokens: latestGeminiMessage.tokens.total ?? 0,
-          }
-        : undefined,
+      model: includeTokenUsage ? latestGeminiMessage?.model : undefined,
+      tokenUsage:
+        includeTokenUsage && latestGeminiMessage?.tokens
+          ? {
+              inputTokens: latestGeminiMessage.tokens.input ?? 0,
+              outputTokens: latestGeminiMessage.tokens.output ?? 0,
+              cacheCreationTokens: 0,
+              cacheReadTokens: latestGeminiMessage.tokens.cached ?? 0,
+              totalTokens: latestGeminiMessage.tokens.total ?? 0,
+            }
+          : undefined,
       phase,
     };
   } catch {
@@ -88,75 +98,94 @@ export function parseGeminiSessionContent(raw: string): Partial<GeminiSessionMet
   }
 }
 
-export async function resolveGeminiProjectDir(cwd: string): Promise<string | undefined> {
-  const geminiTmpRoot = join(HOME, ".gemini", "tmp");
-  if (!existsSync(geminiTmpRoot)) return undefined;
-
-  try {
-    const entries = await readdir(geminiTmpRoot, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const projectDir = join(geminiTmpRoot, entry.name);
-      const projectRootFile = join(projectDir, ".project_root");
-      if (!existsSync(projectRootFile)) continue;
+export async function resolveGeminiProjectDir(
+  cwd: string,
+  options: Pick<GeminiParseOptions, "tmpRoot"> = {},
+): Promise<string | undefined> {
+  return await profileAsync("gemini", "resolveGeminiProjectDir", async () => {
+    const geminiTmpRoot = options.tmpRoot ?? join(HOME, ".gemini", "tmp");
+    const cacheKey = `${geminiTmpRoot}::${cwd}`;
+    const cachedProjectDir = geminiProjectDirCache.get(cacheKey);
+    if (cachedProjectDir) {
+      const cachedProjectRootFile = join(cachedProjectDir, ".project_root");
       try {
-        const projectRoot = (await readFile(projectRootFile, "utf-8")).trim();
-        if (projectRoot === cwd) return projectDir;
+        const projectRoot = (await readFile(cachedProjectRootFile, "utf-8")).trim();
+        if (projectRoot === cwd) return cachedProjectDir;
       } catch {
-        // skip unreadable project_root file
+        // fall through to full scan
       }
+      geminiProjectDirCache.delete(cacheKey);
     }
-  } catch {
-    return undefined;
-  }
 
-  return undefined;
+    try {
+      const entries = await readdir(geminiTmpRoot, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const projectDir = join(geminiTmpRoot, entry.name);
+        const projectRootFile = join(projectDir, ".project_root");
+        try {
+          const projectRoot = (await readFile(projectRootFile, "utf-8")).trim();
+          if (projectRoot === cwd) {
+            geminiProjectDirCache.set(cacheKey, projectDir);
+            return projectDir;
+          }
+        } catch {
+          // skip unreadable project_root file
+        }
+      }
+    } catch {
+      return undefined;
+    }
+
+    return undefined;
+  });
 }
 
 export async function parseGeminiSession(
   cwd: string,
+  options: GeminiParseOptions = {},
 ): Promise<Partial<AgentSession> & { sessionFile?: string }> {
-  const projectDir = await resolveGeminiProjectDir(cwd);
-  if (!projectDir) return {};
+  return await profileAsync("gemini", "parseGeminiSession", async () => {
+    const projectDir = await resolveGeminiProjectDir(cwd, options);
+    if (!projectDir) return {};
 
-  const chatsDir = join(projectDir, "chats");
-  if (!existsSync(chatsDir)) return {};
+    const chatsDir = join(projectDir, "chats");
+    try {
+      const files = (await readdir(chatsDir))
+        .filter((name) => name.startsWith("session-") && name.endsWith(".json"))
+        .map((name) => join(chatsDir, name));
+      if (files.length === 0) return {};
 
-  try {
-    const files = (await readdir(chatsDir))
-      .filter((name) => name.startsWith("session-") && name.endsWith(".json"))
-      .map((name) => join(chatsDir, name));
-    if (files.length === 0) return {};
-
-    let latestFile: string | undefined;
-    let latestMtimeMs = -1;
-    for (const filePath of files) {
-      try {
-        const fileStat = await stat(filePath);
-        if (fileStat.mtimeMs > latestMtimeMs) {
-          latestMtimeMs = fileStat.mtimeMs;
-          latestFile = filePath;
+      let latestFile: string | undefined;
+      let latestMtimeMs = -1;
+      for (const filePath of files) {
+        try {
+          const fileStat = await stat(filePath);
+          if (fileStat.mtimeMs > latestMtimeMs) {
+            latestMtimeMs = fileStat.mtimeMs;
+            latestFile = filePath;
+          }
+        } catch {
+          // skip unreadable file
         }
-      } catch {
-        // skip unreadable file
       }
-    }
-    if (!latestFile) return {};
+      if (!latestFile) return {};
 
-    const parsed = parseGeminiSessionContent(await readFile(latestFile, "utf-8"));
-    return {
-      cwd,
-      sessionId: parsed.sessionId,
-      startedAt: parsed.startedAt,
-      lastActivityAt: parsed.lastActivityAt,
-      lastResponseAt: parsed.lastResponseAt,
-      tokenUsage: parsed.tokenUsage,
-      model: parsed.model,
-      phase: parsed.phase,
-      sessionMatched: true,
-      sessionFile: latestFile,
-    };
-  } catch {
-    return {};
-  }
+      const parsed = parseGeminiSessionContent(await readFile(latestFile, "utf-8"), options);
+      return {
+        cwd,
+        sessionId: parsed.sessionId,
+        startedAt: parsed.startedAt,
+        lastActivityAt: parsed.lastActivityAt,
+        lastResponseAt: parsed.lastResponseAt,
+        tokenUsage: parsed.tokenUsage,
+        model: parsed.model,
+        phase: parsed.phase,
+        sessionMatched: true,
+        sessionFile: latestFile,
+      };
+    } catch {
+      return {};
+    }
+  });
 }
