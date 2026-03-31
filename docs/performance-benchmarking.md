@@ -16,9 +16,9 @@
 재현 가능한 synthetic benchmark
 - 명령
   - `npm run bench:codex-index`
-  - JSON 출력: `npm run bench:codex-index -- --json`
+- JSON 출력: `npm run bench:codex-index -- --json`
 - 스크립트
-  - [scripts/bench-codex-index.mjs](/Users/jaewankim/Desktop/jaewan-develop/marmonitor/scripts/bench-codex-index.mjs)
+  - [`scripts/bench-codex-index.mjs`](../scripts/bench-codex-index.mjs)
 - 기본 동작
   - temp 디렉터리에 결정적인 40-file fixture를 생성한다.
   - 두 fixture profile을 측정한다.
@@ -37,9 +37,9 @@
 실제 statusline live benchmark
 - 명령
   - `npm run bench:statusline-live`
-  - JSON 출력: `npm run bench:statusline-live -- --json`
+- JSON 출력: `npm run bench:statusline-live -- --json`
 - 스크립트
-  - [scripts/bench-statusline-live.mjs](/Users/jaewankim/Desktop/jaewan-develop/marmonitor/scripts/bench-statusline-live.mjs)
+  - [`scripts/bench-statusline-live.mjs`](../scripts/bench-statusline-live.mjs)
 - 기본 동작
   - 모든 marmonitor cache를 비우고 `cold`를 측정한다.
   - 즉시 한 번 더 실행해서 `warm`을 측정한다.

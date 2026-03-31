@@ -6,7 +6,7 @@ marmonitor statusline live findings
 
 권위 있는 측정 방법
 - 현재 이 문서의 수치는 모두 아래 스크립트 출력에 기반한다.
-  - [scripts/bench-statusline-live.mjs](/Users/jaewankim/Desktop/jaewan-develop/marmonitor/scripts/bench-statusline-live.mjs)
+  - [`scripts/bench-statusline-live.mjs`](../scripts/bench-statusline-live.mjs)
 - 실행 명령
   - `node scripts/bench-statusline-live.mjs --json`
 - 이 스크립트는
@@ -78,7 +78,7 @@ marmonitor statusline live findings
   - baseline forced miss with primed runtime state: `2.15s`
   - current forced miss with primed shared caches: `1.09s`
 - 이 값들은 방향성 확인에는 유용했지만, 측정 환경과 명령이 완전히 구조화돼 있지 않았다.
-- 따라서 현재는 이 문서의 스크립트 기반 측정과 [docs/performance-benchmarking.md](/Users/jaewankim/Desktop/jaewan-develop/marmonitor/docs/performance-benchmarking.md)를 권위 있는 기준으로 본다.
+- 따라서 현재는 이 문서의 스크립트 기반 측정과 [`docs/performance-benchmarking.md`](./performance-benchmarking.md)를 권위 있는 기준으로 본다.
 
 구조 개선 요약
 - `stdout heuristic`는 cross-process shared cache를 사용한다.

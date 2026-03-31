@@ -25,9 +25,9 @@ marmonitor 성능 개선 실행 계획
 재현 가능한 benchmark 기준
 - ad-hoc 로그만으로는 `40-file` 수치의 의미를 방어하기 어렵다.
 - 현재 권위 있는 benchmark entrypoint는 두 개다.
-  - [scripts/bench-codex-index.mjs](/Users/jaewankim/Desktop/jaewan-develop/marmonitor/scripts/bench-codex-index.mjs)
-  - [scripts/bench-statusline-live.mjs](/Users/jaewankim/Desktop/jaewan-develop/marmonitor/scripts/bench-statusline-live.mjs)
-- 방법론과 해석 기준은 [docs/performance-benchmarking.md](/Users/jaewankim/Desktop/jaewan-develop/marmonitor/docs/performance-benchmarking.md)에 정리한다.
+  - [`scripts/bench-codex-index.mjs`](../scripts/bench-codex-index.mjs)
+  - [`scripts/bench-statusline-live.mjs`](../scripts/bench-statusline-live.mjs)
+- 방법론과 해석 기준은 [`docs/performance-benchmarking.md`](./performance-benchmarking.md)에 정리한다.
 - 2026-03-31 예시 측정
   - synthetic `heavy / cold_empty_caches`: full avg `20.9ms`, light avg `4.6ms`
   - synthetic `compact / cold_empty_caches`: full avg `5.6ms`, light avg `3.4ms`
