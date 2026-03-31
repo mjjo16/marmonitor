@@ -535,6 +535,75 @@ async function writeCachedSnapshot(
   });
 }
 
+type SnapshotRequestContext = {
+  enrichmentMode: "full" | "light";
+  showDead: boolean;
+  ttlMs: number;
+  useCache: boolean;
+};
+
+type SnapshotScanOptions = {
+  includeTokenUsage?: boolean;
+  includeStdoutHeuristic?: boolean;
+  useSharedRuntimeSnapshots?: boolean;
+};
+
+async function readFreshSnapshotIfAvailable(
+  context: SnapshotRequestContext,
+): Promise<AgentSession[] | undefined> {
+  if (!context.useCache) return undefined;
+  return await readCachedSnapshot(context.enrichmentMode, context.showDead, context.ttlMs);
+}
+
+async function acquireSnapshotRefreshLockWithPolling(
+  context: SnapshotRequestContext,
+): Promise<boolean> {
+  if (!context.useCache) return true;
+
+  let acquired = false;
+  let lockUnavailable = false;
+
+  while (!acquired && !lockUnavailable) {
+    const cached = await readFreshSnapshotIfAvailable(context);
+    if (cached) return false;
+
+    try {
+      acquired = await profileAsync("snapshot", "acquireSnapshotRefreshLock", () =>
+        acquireSnapshotRefreshLock(context.enrichmentMode, context.showDead),
+      );
+    } catch {
+      lockUnavailable = true;
+    }
+
+    if (!acquired && !lockUnavailable) {
+      await sleep(SNAPSHOT_LOCK_POLL_MS);
+    }
+  }
+
+  return acquired;
+}
+
+async function scanAndPersistSnapshot(
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  context: SnapshotRequestContext,
+  options: SnapshotScanOptions,
+): Promise<AgentSession[]> {
+  const agents = await profileAsync("snapshot", "scanAgents", () =>
+    scanAgents(config, {
+      enrichmentMode: context.enrichmentMode,
+      includeTokenUsage: options.includeTokenUsage,
+      includeStdoutHeuristic: options.includeStdoutHeuristic,
+      useSharedRuntimeSnapshots: options.useSharedRuntimeSnapshots,
+    }),
+  );
+
+  if (context.useCache) {
+    await writeCachedSnapshot(context.enrichmentMode, context.showDead, agents);
+  }
+
+  return agents;
+}
+
 async function getAgentsSnapshot(
   config: Awaited<ReturnType<typeof loadConfig>>,
   options: {
@@ -545,55 +614,28 @@ async function getAgentsSnapshot(
     useSharedRuntimeSnapshots?: boolean;
   } = {},
 ): Promise<AgentSession[]> {
-  const enrichmentMode = options.enrichmentMode ?? "full";
   const ttlMs = options.ttlMs ?? config.performance.snapshotTtlMs;
-  const useCache = ttlMs > 0;
+  const context: SnapshotRequestContext = {
+    enrichmentMode: options.enrichmentMode ?? "full",
+    showDead: config.display.showDead,
+    ttlMs,
+    useCache: ttlMs > 0,
+  };
 
   return await profileAsync("snapshot", "getAgentsSnapshot", async () => {
-    if (useCache) {
-      const cached = await readCachedSnapshot(enrichmentMode, config.display.showDead, ttlMs);
-      if (cached) return cached;
-    }
+    const cachedBeforeLock = await readFreshSnapshotIfAvailable(context);
+    if (cachedBeforeLock) return cachedBeforeLock;
 
-    let acquired = !useCache;
-    let lockUnavailable = false;
-    while (useCache && !acquired && !lockUnavailable) {
-      const cached = await readCachedSnapshot(enrichmentMode, config.display.showDead, ttlMs);
-      if (cached) return cached;
-
-      try {
-        acquired = await profileAsync("snapshot", "acquireSnapshotRefreshLock", () =>
-          acquireSnapshotRefreshLock(enrichmentMode, config.display.showDead),
-        );
-      } catch {
-        lockUnavailable = true;
-      }
-      if (!acquired) {
-        await sleep(SNAPSHOT_LOCK_POLL_MS);
-      }
-    }
+    const acquired = await acquireSnapshotRefreshLockWithPolling(context);
 
     try {
-      if (useCache) {
-        const cached = await readCachedSnapshot(enrichmentMode, config.display.showDead, ttlMs);
-        if (cached) return cached;
-      }
+      const cachedAfterLock = await readFreshSnapshotIfAvailable(context);
+      if (cachedAfterLock) return cachedAfterLock;
 
-      const agents = await profileAsync("snapshot", "scanAgents", () =>
-        scanAgents(config, {
-          enrichmentMode,
-          includeTokenUsage: options.includeTokenUsage,
-          includeStdoutHeuristic: options.includeStdoutHeuristic,
-          useSharedRuntimeSnapshots: options.useSharedRuntimeSnapshots,
-        }),
-      );
-      if (useCache) {
-        await writeCachedSnapshot(enrichmentMode, config.display.showDead, agents);
-      }
-      return agents;
+      return await scanAndPersistSnapshot(config, context, options);
     } finally {
-      if (useCache && acquired) {
-        await releaseSnapshotRefreshLock(enrichmentMode, config.display.showDead);
+      if (context.useCache && acquired) {
+        await releaseSnapshotRefreshLock(context.enrichmentMode, context.showDead);
       }
     }
   });
