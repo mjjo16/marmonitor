@@ -13,6 +13,10 @@
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue" alt="platform">
 </p>
 
+<p align="center">
+  <b>English</b> | <a href="README.ko.md">한국어</a>
+</p>
+
 ---
 
 ## Why marmonitor?
