@@ -12,6 +12,7 @@ import { BoundedMap } from "./bounded-map.js";
 export const HOME = homedir();
 export const PROCESS_CWD_TTL_MS = 60_000;
 export const PROCESS_START_TTL_MS = 300_000;
+export const PROCESS_START_SHARED_TTL_MS = 60_000;
 export const CODEX_INDEX_TTL_MS = 30_000;
 export const CLAUDE_SESSION_MTIME_MATCH_SEC = 120;
 export const CLAUDE_SESSION_AMBIGUITY_GAP_SEC = 300;

@@ -10,6 +10,7 @@ import { profileAsync } from "../perf.js";
 import type { RuntimeSource } from "../types.js";
 import {
   PROCESS_CWD_TTL_MS,
+  PROCESS_START_SHARED_TTL_MS,
   PROCESS_START_TTL_MS,
   processCwdCache,
   processStartCache,
@@ -28,6 +29,8 @@ interface ProcessStartOptions {
   cacheRoot?: string;
   nowMs?: number;
   execFile?: typeof execFileAsync;
+  sharedKey?: string;
+  sharedTtlMs?: number;
 }
 
 /** Get process cwd via lsof (fallback for non-Claude agents) */
@@ -95,26 +98,30 @@ export async function getProcessStartTime(
   options: ProcessStartOptions = {},
 ): Promise<number | undefined> {
   const nowMs = options.nowMs ?? Date.now();
+  const sharedKey = options.sharedKey ?? String(pid);
+  const sharedTtlMs = options.sharedTtlMs ?? PROCESS_START_SHARED_TTL_MS;
   const cached = processStartCache.get(pid);
   if (cached && nowMs - cached.checkedAt < PROCESS_START_TTL_MS) {
     return cached.startedAt;
   }
 
-  const sharedCached = await readSharedCache<number | undefined>(
-    "process-start",
-    String(pid),
-    PROCESS_START_TTL_MS,
-    {
-      cacheRoot: options.cacheRoot,
-      nowMs,
-    },
-  );
-  if (sharedCached) {
-    processStartCache.set(pid, {
-      checkedAt: sharedCached.checkedAt,
-      startedAt: sharedCached.value,
-    });
-    return sharedCached.value;
+  if (sharedTtlMs > 0) {
+    const sharedCached = await readSharedCache<number | undefined>(
+      "process-start",
+      sharedKey,
+      sharedTtlMs,
+      {
+        cacheRoot: options.cacheRoot,
+        nowMs,
+      },
+    );
+    if (sharedCached) {
+      processStartCache.set(pid, {
+        checkedAt: sharedCached.checkedAt,
+        startedAt: sharedCached.value,
+      });
+      return sharedCached.value;
+    }
   }
 
   const runExecFile = options.execFile ?? execFileAsync;
@@ -131,20 +138,24 @@ export async function getProcessStartTime(
       checkedAt: nowMs,
       startedAt,
     });
-    await writeSharedCache("process-start", String(pid), startedAt, {
-      cacheRoot: options.cacheRoot,
-      nowMs,
-    });
+    if (sharedTtlMs > 0) {
+      await writeSharedCache("process-start", sharedKey, startedAt, {
+        cacheRoot: options.cacheRoot,
+        nowMs,
+      });
+    }
     return startedAt;
   } catch {
     processStartCache.set(pid, {
       checkedAt: nowMs,
       startedAt: undefined,
     });
-    await writeSharedCache("process-start", String(pid), undefined, {
-      cacheRoot: options.cacheRoot,
-      nowMs,
-    });
+    if (sharedTtlMs > 0) {
+      await writeSharedCache("process-start", sharedKey, undefined, {
+        cacheRoot: options.cacheRoot,
+        nowMs,
+      });
+    }
     return undefined;
   }
 }

@@ -47,6 +47,12 @@ function normalizePidUsage(usage: Awaited<ReturnType<typeof pidusage>>): Process
   return normalized;
 }
 
+export async function listProcesses(options: ProcessListOptions = {}): Promise<ProcessListEntry[]> {
+  const runPsList = options.psList ?? psList;
+  const processes = await profileAsync("scanAgents", "ps_list", () => runPsList());
+  return normalizeProcesses(processes);
+}
+
 export async function listProcessesCached(
   options: ProcessListOptions = {},
 ): Promise<ProcessListEntry[]> {
@@ -64,14 +70,24 @@ export async function listProcessesCached(
     return sharedCached.value;
   }
 
-  const runPsList = options.psList ?? psList;
-  const processes = await profileAsync("scanAgents", "ps_list", () => runPsList());
-  const normalized = normalizeProcesses(processes);
+  const normalized = await listProcesses(options);
   await writeSharedCache("process-list", "all", normalized, {
     cacheRoot: options.cacheRoot,
     nowMs,
   });
   return normalized;
+}
+
+export async function getPidUsage(
+  pids: number[],
+  options: PidUsageOptions = {},
+): Promise<ProcessUsageMap> {
+  const normalizedPids = [...new Set(pids)].sort((a, b) => a - b);
+  if (normalizedPids.length === 0) return {};
+
+  const runPidusage = options.pidusage ?? pidusage;
+  const usage = await profileAsync("scanAgents", "pidusage", () => runPidusage(normalizedPids));
+  return normalizePidUsage(usage);
 }
 
 export async function getPidUsageCached(
@@ -96,9 +112,7 @@ export async function getPidUsageCached(
     return sharedCached.value;
   }
 
-  const runPidusage = options.pidusage ?? pidusage;
-  const usage = await profileAsync("scanAgents", "pidusage", () => runPidusage(normalizedPids));
-  const normalized = normalizePidUsage(usage);
+  const normalized = await getPidUsage(normalizedPids, options);
   await writeSharedCache("pidusage", sharedKey, normalized, {
     cacheRoot: options.cacheRoot,
     nowMs,

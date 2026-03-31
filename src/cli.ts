@@ -41,6 +41,7 @@ import {
   releaseSnapshotRefreshLock,
   snapshotCacheFile,
   statuslineCacheFile,
+  writeCacheFileAtomically,
 } from "./snapshot-cache.js";
 import { captureTmuxPaneOutput, jumpToAgent, resolveTmuxJumpTarget } from "./tmux/index.js";
 import type { AgentSession } from "./types.js";
@@ -494,7 +495,7 @@ async function writeCachedStatusline(
     const path = statuslineCacheFile(format, attentionLimit, width);
     try {
       await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
-      await writeFile(path, value, "utf-8");
+      await writeCacheFileAtomically(path, value);
     } catch {
       // cache failures must never break statusline rendering
     }
@@ -527,7 +528,7 @@ async function writeCachedSnapshot(
     const path = snapshotCacheFile(enrichmentMode, showDead);
     try {
       await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
-      await writeFile(path, JSON.stringify(agents), "utf-8");
+      await writeCacheFileAtomically(path, JSON.stringify(agents));
     } catch {
       // snapshot cache failures must never break command execution
     }
@@ -541,6 +542,7 @@ async function getAgentsSnapshot(
     ttlMs?: number;
     includeTokenUsage?: boolean;
     includeStdoutHeuristic?: boolean;
+    useSharedRuntimeSnapshots?: boolean;
   } = {},
 ): Promise<AgentSession[]> {
   const enrichmentMode = options.enrichmentMode ?? "full";
@@ -582,6 +584,7 @@ async function getAgentsSnapshot(
           enrichmentMode,
           includeTokenUsage: options.includeTokenUsage,
           includeStdoutHeuristic: options.includeStdoutHeuristic,
+          useSharedRuntimeSnapshots: options.useSharedRuntimeSnapshots,
         }),
       );
       if (useCache) {
@@ -633,6 +636,7 @@ program
         const agents = await getAgentsSnapshot(config, {
           enrichmentMode: "light",
           includeStdoutHeuristic: true,
+          useSharedRuntimeSnapshots: true,
         });
         const rendered = await renderStatusline(
           agents,

@@ -40,7 +40,12 @@ import {
   getProcessCwd,
   getProcessStartTime,
 } from "./process.js";
-import { getPidUsageCached, listProcessesCached } from "./runtime-snapshot.js";
+import {
+  getPidUsage,
+  getPidUsageCached,
+  listProcesses,
+  listProcessesCached,
+} from "./runtime-snapshot.js";
 import { detectCliStdoutPhase, determineStatus } from "./status.js";
 
 import type { ScanOptions } from "./types.js";
@@ -56,10 +61,11 @@ export async function scanAgents(
   const isFullEnrichment = enrichmentMode === "full";
   const includeTokenUsage = options.includeTokenUsage ?? isFullEnrichment;
   const includeStdoutHeuristic = options.includeStdoutHeuristic ?? isFullEnrichment;
+  const useSharedRuntimeSnapshots = options.useSharedRuntimeSnapshots ?? false;
   const seenPids = new Set<number>();
 
   // 1. Find running processes
-  const processes = await listProcessesCached();
+  const processes = useSharedRuntimeSnapshots ? await listProcessesCached() : await listProcesses();
 
   // Filter to agent processes
   const agentProcesses: Array<{ proc: (typeof processes)[0]; agentName: string }> = [];
@@ -82,7 +88,9 @@ export async function scanAgents(
   let usageMap: Record<number, { cpu: number; memory: number }> = {};
   if (pids.length > 0) {
     try {
-      usageMap = await getPidUsageCached(pids);
+      usageMap = useSharedRuntimeSnapshots
+        ? await getPidUsageCached(pids)
+        : await getPidUsage(pids);
     } catch {
       // some PIDs may have exited
     }
@@ -173,7 +181,9 @@ export async function scanAgents(
       if (cwdMatches.length === 1) {
         matched = cwdMatches[0];
       } else if (cwdMatches.length > 1) {
-        const processStartTime = await getProcessStartTime(proc.pid);
+        const processStartTime = await getProcessStartTime(proc.pid, {
+          sharedKey: `${proc.pid}:${proc.ppid}:${proc.name}:${proc.cmd ?? ""}`,
+        });
         matched = selectCodexSession(cwd, processStartTime, cwdMatches);
       }
       if (matched) {
@@ -204,7 +214,11 @@ export async function scanAgents(
       const geminiData = await parseGeminiSession(cwd, {
         includeTokenUsage,
       });
-      startedAt = geminiData.startedAt ?? (await getProcessStartTime(proc.pid));
+      startedAt =
+        geminiData.startedAt ??
+        (await getProcessStartTime(proc.pid, {
+          sharedKey: `${proc.pid}:${proc.ppid}:${proc.name}:${proc.cmd ?? ""}`,
+        }));
       sessionId = geminiData.sessionId;
       tokenUsage = geminiData.tokenUsage;
       model = geminiData.model;

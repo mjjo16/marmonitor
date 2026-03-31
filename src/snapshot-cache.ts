@@ -1,4 +1,5 @@
-import { mkdir, open, stat, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, open, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -32,6 +33,19 @@ export function snapshotRefreshLockFile(
   root = tmpdir(),
 ): string {
   return join(cacheDir(root), `snapshot-${enrichmentMode}-${showDead ? "dead" : "alive"}.lock`);
+}
+
+export async function writeCacheFileAtomically(path: string, value: string): Promise<void> {
+  const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(tempPath, value, "utf-8");
+    await rename(tempPath, path);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function releaseSnapshotRefreshLock(

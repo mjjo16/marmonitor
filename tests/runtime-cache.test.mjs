@@ -239,6 +239,43 @@ describe("shared process start cache", () => {
     assert.equal(second, undefined);
     assert.equal(execCalls, 1);
   });
+
+  it("partitions shared start-time cache by process identity key", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "marmonitor-start-identity-"));
+    let execCalls = 0;
+
+    processStartCache.clear();
+    const first = await getProcessStartTime(88_005, {
+      cacheRoot,
+      nowMs: 1_000,
+      sharedKey: "88_005:parent-a:codex:a",
+      execFile: async () => {
+        execCalls += 1;
+        return {
+          stdout: "Mon Mar 31 10:00:00 2026\n",
+          stderr: "",
+        };
+      },
+    });
+
+    processStartCache.clear();
+    const second = await getProcessStartTime(88_005, {
+      cacheRoot,
+      nowMs: 2_000,
+      sharedKey: "88_005:parent-b:codex:b",
+      execFile: async () => {
+        execCalls += 1;
+        return {
+          stdout: "Mon Mar 31 11:00:00 2026\n",
+          stderr: "",
+        };
+      },
+    });
+
+    assert.equal(first, new Date("Mon Mar 31 10:00:00 2026").getTime() / 1000);
+    assert.equal(second, new Date("Mon Mar 31 11:00:00 2026").getTime() / 1000);
+    assert.equal(execCalls, 2);
+  });
 });
 
 describe("shared process runtime snapshots", () => {
