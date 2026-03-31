@@ -480,16 +480,18 @@ export async function detectClaudePhase(
 async function readJsonlFirstLine(
   filePath: string,
 ): Promise<{ sessionId?: string; cwd?: string; timestamp?: string } | undefined> {
+  let fd: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    const fd = await open(filePath, "r");
+    fd = await open(filePath, "r");
     const buf = Buffer.alloc(4096);
     await fd.read(buf, 0, 4096, 0);
-    await fd.close();
     const firstLine = buf.toString("utf-8").split("\n")[0];
     if (!firstLine) return undefined;
     return JSON.parse(firstLine);
   } catch {
     return undefined;
+  } finally {
+    await fd?.close().catch(() => {});
   }
 }
 
