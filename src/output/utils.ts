@@ -44,12 +44,16 @@ export function formatTokens(n: number): string {
 }
 
 /** Compact directory label for dock/focus display.
- *  Shows last 2 path segments to avoid basename collisions.
- *  e.g. "/Users/macrent/.ai/projects/mjjo" → "projects/mjjo"
- *       "/Users/macrent/Documents/valueofspace/vos-data-service" → "valueofspace/vos-data-service"
+ *  Replaces $HOME with ~ first, then shows last 2 path segments.
+ *  e.g. "/Users/macrent" → "~"
+ *       "/Users/macrent/marmonitor" → "~/marmonitor"
+ *       "/Users/macrent/Documents/vos/vos-data-service" → "vos/vos-data-service"
  *       "/Users/macrent/.ai/projects/vos" → "projects/vos" */
 export function compactDirLabel(cwd: string): string {
-  const parts = cwd.split("/").filter(Boolean);
+  const home = process.env.HOME ?? "";
+  const shortened = home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+  if (shortened === "~") return "~";
+  const parts = shortened.split("/").filter(Boolean);
   if (parts.length <= 1) return parts[0] || cwd;
   return parts.slice(-2).join("/");
 }
