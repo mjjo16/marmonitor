@@ -28,12 +28,22 @@ import {
   codexSessionRegistry,
 } from "./cache.js";
 import type { CodexSessionMeta } from "./cache.js";
+import { readSharedCache, writeSharedCache } from "./shared-cache.js";
 
 export type { CodexSessionMeta } from "./cache.js";
+
+const CODEX_SHARED_PHASE_TTL_MS = 60_000;
 
 interface CodexIndexOptions {
   includeTokenUsage?: boolean;
   runtimePaths?: RuntimeDataPaths;
+}
+
+interface CodexPhaseCacheOptions {
+  cacheRoot?: string;
+  nowMs?: number;
+  openFile?: typeof open;
+  statFile?: typeof stat;
 }
 
 export function getCodexSessionRoots(
@@ -50,12 +60,16 @@ export function getCodexSessionRoots(
 export async function detectCodexPhase(
   sessionFilePath: string | undefined,
   config?: MarmonitorConfig,
+  options: CodexPhaseCacheOptions = {},
 ): Promise<SessionPhase> {
   return await profileAsync("codex", "detectCodexPhase", async () => {
     if (!sessionFilePath || !existsSync(sessionFilePath)) return undefined;
 
     try {
-      const fileStat = await stat(sessionFilePath);
+      const nowMs = options.nowMs ?? Date.now();
+      const statFile = options.statFile ?? stat;
+      const openFile = options.openFile ?? open;
+      const fileStat = await statFile(sessionFilePath);
       const cached = codexPhaseCache.get(sessionFilePath);
       if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
         return config
@@ -68,13 +82,47 @@ export async function detectCodexPhase(
           : cached.result.phase;
       }
 
+      const sharedKey = `${sessionFilePath}:${fileStat.mtimeMs}:${fileStat.size}`;
+      const sharedCached = await readSharedCache<SessionPhase>(
+        "codex-phase",
+        sharedKey,
+        CODEX_SHARED_PHASE_TTL_MS,
+        {
+          cacheRoot: options.cacheRoot,
+          nowMs,
+        },
+      );
+      if (sharedCached) {
+        codexPhaseCache.set(sessionFilePath, {
+          mtimeMs: fileStat.mtimeMs,
+          size: fileStat.size,
+          phaseDetectedAtMs: sharedCached.value ? sharedCached.checkedAt : undefined,
+          offset: fileStat.size,
+          remainder: "",
+          recentLines: [],
+          previousPhase: sharedCached.value,
+          history: sharedCached.value
+            ? [{ phase: sharedCached.value, at: sharedCached.checkedAt }]
+            : [],
+          result: { phase: sharedCached.value },
+        });
+        return config
+          ? resolvePhaseWithDecay(
+              sharedCached.value,
+              sharedCached.value,
+              sharedCached.value ? sharedCached.checkedAt : undefined,
+              config.status.phaseDecay,
+            )
+          : sharedCached.value;
+      }
+
       const { size } = fileStat;
       const shouldAppend = Boolean(cached) && size >= (cached?.offset ?? 0);
       const readFrom = shouldAppend ? (cached?.offset ?? 0) : 0;
       const previousRemainder = shouldAppend ? (cached?.remainder ?? "") : "";
       const previousLines = shouldAppend ? (cached?.recentLines ?? []) : [];
       const readSize = Math.max(0, size - readFrom);
-      const fd = await open(sessionFilePath, "r");
+      const fd = await openFile(sessionFilePath, "r");
       const buf = Buffer.alloc(readSize);
       await fd.read(buf, 0, readSize, readFrom);
       await fd.close();
@@ -122,13 +170,8 @@ export async function detectCodexPhase(
             config.status.phaseDecay,
           )
         : phase;
-      const resolvedPhase = resolvePhaseFromHistory(
-        decayedPhase,
-        cached?.history ?? [],
-        Date.now(),
-      );
+      const resolvedPhase = resolvePhaseFromHistory(decayedPhase, cached?.history ?? [], nowMs);
 
-      const nowMs = Date.now();
       const transition = updatePhaseHistory(
         cached?.result.phase,
         cached?.history ?? [],
@@ -145,6 +188,10 @@ export async function detectCodexPhase(
         previousPhase: transition.previousPhase,
         history: transition.history,
         result: { phase: resolvedPhase },
+      });
+      await writeSharedCache("codex-phase", sharedKey, resolvedPhase, {
+        cacheRoot: options.cacheRoot,
+        nowMs,
       });
       return resolvedPhase;
     } catch {

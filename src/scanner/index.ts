@@ -8,8 +8,6 @@
 
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import pidusage from "pidusage";
-import psList from "ps-list";
 import type { MarmonitorConfig } from "../config/index.js";
 import { resolveRuntimeDataPaths } from "../config/index.js";
 import { profileAsync } from "../perf.js";
@@ -42,6 +40,7 @@ import {
   getProcessCwd,
   getProcessStartTime,
 } from "./process.js";
+import { getPidUsageCached, listProcessesCached } from "./runtime-snapshot.js";
 import { detectCliStdoutPhase, determineStatus } from "./status.js";
 
 import type { ScanOptions } from "./types.js";
@@ -60,7 +59,7 @@ export async function scanAgents(
   const seenPids = new Set<number>();
 
   // 1. Find running processes
-  const processes = await profileAsync("scanAgents", "ps_list", () => psList());
+  const processes = await listProcessesCached();
 
   // Filter to agent processes
   const agentProcesses: Array<{ proc: (typeof processes)[0]; agentName: string }> = [];
@@ -83,7 +82,7 @@ export async function scanAgents(
   let usageMap: Record<number, { cpu: number; memory: number }> = {};
   if (pids.length > 0) {
     try {
-      usageMap = await profileAsync("scanAgents", "pidusage", () => pidusage(pids));
+      usageMap = await getPidUsageCached(pids);
     } catch {
       // some PIDs may have exited
     }

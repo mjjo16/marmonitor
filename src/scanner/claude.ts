@@ -30,6 +30,17 @@ import {
   claudeTokenCache,
 } from "./cache.js";
 import type { PhaseResult } from "./cache.js";
+import { readSharedCache, writeSharedCache } from "./shared-cache.js";
+
+const CLAUDE_SHARED_SESSION_TTL_MS = 60_000;
+const CLAUDE_SHARED_PHASE_TTL_MS = 60_000;
+
+interface ClaudeSharedCacheOptions {
+  cacheRoot?: string;
+  nowMs?: number;
+  openFile?: typeof open;
+  statFile?: typeof stat;
+}
 
 export function getClaudeProjectRoots(
   config?: MarmonitorConfig,
@@ -142,10 +153,38 @@ export async function resolveClaudeSessionFile(
   startedAt?: number,
   config?: MarmonitorConfig,
   runtimePaths?: RuntimeDataPaths,
+  options: ClaudeSharedCacheOptions = {},
 ): Promise<string | undefined> {
   return await profileAsync("claude", "resolveClaudeSessionFile", async () => {
+    const nowMs = options.nowMs ?? Date.now();
     const registeredPath = resolveSessionRegistryPath(claudeSessionRegistry, sessionId);
     if (registeredPath && existsSync(registeredPath)) return registeredPath;
+
+    const sharedKey = `${sessionId}:${cwd}:${startedAt ?? ""}`;
+    const sharedCached = await readSharedCache<string>(
+      "claude-session-file",
+      sharedKey,
+      CLAUDE_SHARED_SESSION_TTL_MS,
+      {
+        cacheRoot: options.cacheRoot,
+        nowMs,
+      },
+    );
+    if (sharedCached?.value && existsSync(sharedCached.value)) {
+      upsertSessionRegistryEntry(claudeSessionRegistry, {
+        filePath: sharedCached.value,
+        sessionId,
+        cwd,
+        firstSeenOffset: 0,
+        startedAt,
+        source: "claude",
+      });
+      const sharedDir = sharedCached.value.split("/").at(-2);
+      if (sharedDir) {
+        claudeProjectDirCache.set(`${cwd}::${sessionId ?? ""}`, sharedDir);
+      }
+      return sharedCached.value;
+    }
 
     const projectDirName = await findClaudeProjectDir(cwd, sessionId, config, runtimePaths);
     if (!projectDirName) return undefined;
@@ -161,6 +200,10 @@ export async function resolveClaudeSessionFile(
           firstSeenOffset: 0,
           startedAt,
           source: "claude",
+        });
+        await writeSharedCache("claude-session-file", sharedKey, directPath, {
+          cacheRoot: options.cacheRoot,
+          nowMs,
         });
         return directPath;
       }
@@ -205,6 +248,10 @@ export async function resolveClaudeSessionFile(
           startedAt,
           source: "claude",
         });
+        await writeSharedCache("claude-session-file", sharedKey, fallbackPath, {
+          cacheRoot: options.cacheRoot,
+          nowMs,
+        });
         return fallbackPath;
       }
       if (second && second.deltaSec - best.deltaSec < CLAUDE_SESSION_AMBIGUITY_GAP_SEC) {
@@ -218,6 +265,10 @@ export async function resolveClaudeSessionFile(
           startedAt,
           source: "claude",
         });
+        await writeSharedCache("claude-session-file", sharedKey, fallbackPath, {
+          cacheRoot: options.cacheRoot,
+          nowMs,
+        });
         return fallbackPath;
       }
       upsertSessionRegistryEntry(claudeSessionRegistry, {
@@ -227,6 +278,10 @@ export async function resolveClaudeSessionFile(
         firstSeenOffset: 0,
         startedAt,
         source: "claude",
+      });
+      await writeSharedCache("claude-session-file", sharedKey, best.path, {
+        cacheRoot: options.cacheRoot,
+        nowMs,
       });
       return best.path;
     } catch {
@@ -336,6 +391,7 @@ export async function detectClaudePhase(
   startedAt?: number,
   config?: MarmonitorConfig,
   runtimePaths?: RuntimeDataPaths,
+  options: ClaudeSharedCacheOptions = {},
 ): Promise<PhaseResult> {
   return await profileAsync("claude", "detectClaudePhase", async () => {
     const sessionFile = await resolveClaudeSessionFile(
@@ -344,11 +400,15 @@ export async function detectClaudePhase(
       startedAt,
       config,
       runtimePaths,
+      options,
     );
     if (!sessionFile || !existsSync(sessionFile)) return {};
 
     try {
-      const fileStat = await stat(sessionFile);
+      const nowMs = options.nowMs ?? Date.now();
+      const statFile = options.statFile ?? stat;
+      const openFile = options.openFile ?? open;
+      const fileStat = await statFile(sessionFile);
       const cached = claudePhaseCache.get(sessionFile);
       if (cached && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
         return {
@@ -364,13 +424,51 @@ export async function detectClaudePhase(
         };
       }
 
+      const sharedKey = `${sessionFile}:${fileStat.mtimeMs}:${fileStat.size}`;
+      const sharedCached = await readSharedCache<PhaseResult>(
+        "claude-phase",
+        sharedKey,
+        CLAUDE_SHARED_PHASE_TTL_MS,
+        {
+          cacheRoot: options.cacheRoot,
+          nowMs,
+        },
+      );
+      if (sharedCached) {
+        const sharedResult = sharedCached.value;
+        claudePhaseCache.set(sessionFile, {
+          mtimeMs: fileStat.mtimeMs,
+          size: fileStat.size,
+          phaseDetectedAtMs: sharedResult.phase ? sharedCached.checkedAt : undefined,
+          offset: fileStat.size,
+          remainder: "",
+          recentLines: [],
+          previousPhase: sharedResult.phase,
+          history: sharedResult.phase
+            ? [{ phase: sharedResult.phase, at: sharedCached.checkedAt }]
+            : [],
+          result: sharedResult,
+        });
+        return {
+          ...sharedResult,
+          phase: config
+            ? resolvePhaseWithDecay(
+                sharedResult.phase,
+                sharedResult.phase,
+                sharedResult.phase ? sharedCached.checkedAt : undefined,
+                config.status.phaseDecay,
+              )
+            : sharedResult.phase,
+        };
+      }
+
       const { size } = fileStat;
       const shouldAppend = Boolean(cached) && size >= (cached?.offset ?? 0);
       const readFrom = shouldAppend ? (cached?.offset ?? 0) : 0;
       const previousRemainder = shouldAppend ? (cached?.remainder ?? "") : "";
       const previousLines = shouldAppend ? (cached?.recentLines ?? []) : [];
       const readSize = Math.max(0, size - readFrom);
-      const fd = await open(sessionFile, "r");
+      const fd = await openFile(sessionFile, "r");
       const buf = Buffer.alloc(readSize);
       await fd.read(buf, 0, readSize, readFrom);
       await fd.close();
@@ -479,13 +577,8 @@ export async function detectClaudePhase(
             config.status.phaseDecay,
           )
         : phase;
-      const resolvedPhase = resolvePhaseFromHistory(
-        decayedPhase,
-        cached?.history ?? [],
-        Date.now(),
-      );
+      const resolvedPhase = resolvePhaseFromHistory(decayedPhase, cached?.history ?? [], nowMs);
 
-      const nowMs = Date.now();
       const transition = updatePhaseHistory(
         cached?.result.phase,
         cached?.history ?? [],
@@ -503,6 +596,10 @@ export async function detectClaudePhase(
         previousPhase: transition.previousPhase,
         history: transition.history,
         result,
+      });
+      await writeSharedCache("claude-phase", sharedKey, result, {
+        cacheRoot: options.cacheRoot,
+        nowMs,
       });
       return result;
     } catch {

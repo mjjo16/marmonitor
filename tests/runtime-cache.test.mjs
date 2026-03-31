@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { getDefaults } from "../dist/config/index.js";
-import { processCwdCache, stdoutHeuristicCache } from "../dist/scanner/cache.js";
+import {
+  claudePhaseCache,
+  claudeProjectDirCache,
+  claudeSessionRegistry,
+  codexPhaseCache,
+  processCwdCache,
+  stdoutHeuristicCache,
+} from "../dist/scanner/cache.js";
+import { detectClaudePhase, resolveClaudeSessionFile } from "../dist/scanner/claude.js";
+import { detectCodexPhase } from "../dist/scanner/codex.js";
 import { getProcessCwd } from "../dist/scanner/process.js";
+import { getPidUsageCached, listProcessesCached } from "../dist/scanner/runtime-snapshot.js";
 import { detectCliStdoutPhase } from "../dist/scanner/status.js";
 
 describe("shared stdout heuristic cache", () => {
@@ -162,5 +172,261 @@ describe("shared process cwd cache", () => {
 
     assert.equal(second, undefined);
     assert.equal(execCalls, 1);
+  });
+});
+
+describe("shared process runtime snapshots", () => {
+  it("reuses ps-list results across fresh calls", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "marmonitor-process-list-cache-"));
+    let calls = 0;
+
+    const first = await listProcessesCached({
+      cacheRoot,
+      nowMs: 1_000,
+      psList: async () => {
+        calls += 1;
+        return [
+          {
+            pid: 101,
+            ppid: 1,
+            name: "codex",
+            cmd: "codex --sandbox",
+          },
+        ];
+      },
+    });
+
+    assert.deepEqual(first, [
+      {
+        pid: 101,
+        ppid: 1,
+        name: "codex",
+        cmd: "codex --sandbox",
+      },
+    ]);
+    assert.equal(calls, 1);
+
+    const second = await listProcessesCached({
+      cacheRoot,
+      nowMs: 1_500,
+      psList: async () => {
+        throw new Error("shared cache miss");
+      },
+    });
+
+    assert.deepEqual(second, first);
+    assert.equal(calls, 1);
+  });
+
+  it("reuses pidusage results across fresh calls", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "marmonitor-pidusage-cache-"));
+    let calls = 0;
+
+    const first = await getPidUsageCached([101, 202], {
+      cacheRoot,
+      nowMs: 1_000,
+      pidusage: async () => {
+        calls += 1;
+        return {
+          101: { cpu: 12.3, memory: 456 },
+          202: { cpu: 4.5, memory: 789 },
+        };
+      },
+    });
+
+    assert.deepEqual(first, {
+      101: { cpu: 12.3, memory: 456 },
+      202: { cpu: 4.5, memory: 789 },
+    });
+    assert.equal(calls, 1);
+
+    const second = await getPidUsageCached([202, 101], {
+      cacheRoot,
+      nowMs: 1_500,
+      pidusage: async () => {
+        throw new Error("shared cache miss");
+      },
+    });
+
+    assert.deepEqual(second, first);
+    assert.equal(calls, 1);
+  });
+});
+
+describe("shared Claude caches", () => {
+  it("reuses resolved Claude session files across in-memory cache clears", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "marmonitor-claude-session-cache-"));
+    const projectRoot = await mkdtemp(join(tmpdir(), "marmonitor-claude-projects-"));
+    const cwd = "/tmp/shared-claude-project";
+    const sessionId = "claude-session-shared";
+    const startedAt = 1_717_171_717;
+    const projectDirName = cwd.replace(/[/.]/g, "-");
+    const sessionDir = join(projectRoot, projectDirName);
+    const sessionFile = join(sessionDir, `${sessionId}.jsonl`);
+    const runtimePaths = {
+      claudeProjects: [projectRoot],
+      claudeSessions: [],
+      codexSessions: [],
+      extraRoots: [],
+    };
+
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(sessionFile, "", "utf8");
+
+    claudeSessionRegistry.clear();
+    claudeProjectDirCache.clear();
+
+    const first = await resolveClaudeSessionFile(
+      sessionId,
+      cwd,
+      startedAt,
+      undefined,
+      runtimePaths,
+      {
+        cacheRoot,
+        nowMs: 1_000,
+      },
+    );
+
+    assert.equal(first, sessionFile);
+
+    claudeSessionRegistry.clear();
+    claudeProjectDirCache.clear();
+
+    const second = await resolveClaudeSessionFile(
+      sessionId,
+      cwd,
+      startedAt,
+      undefined,
+      {
+        claudeProjects: [],
+        claudeSessions: [],
+        codexSessions: [],
+        extraRoots: [],
+      },
+      {
+        cacheRoot,
+        nowMs: 2_000,
+      },
+    );
+
+    assert.equal(second, sessionFile);
+  });
+
+  it("reuses Claude phase results across in-memory cache clears", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "marmonitor-claude-phase-cache-"));
+    const projectRoot = await mkdtemp(join(tmpdir(), "marmonitor-claude-projects-"));
+    const cwd = "/tmp/shared-claude-phase";
+    const sessionId = "claude-phase-shared";
+    const startedAt = 1_717_171_717;
+    const projectDirName = cwd.replace(/[/.]/g, "-");
+    const sessionDir = join(projectRoot, projectDirName);
+    const sessionFile = join(sessionDir, `${sessionId}.jsonl`);
+    const runtimePaths = {
+      claudeProjects: [projectRoot],
+      claudeSessions: [],
+      codexSessions: [],
+      extraRoots: [],
+    };
+
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(
+      sessionFile,
+      `${[
+        JSON.stringify({
+          type: "assistant",
+          timestamp: "2026-03-31T10:00:00.000Z",
+          message: {
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "done" }],
+          },
+        }),
+      ].join("\n")}\n`,
+      "utf8",
+    );
+
+    claudeSessionRegistry.clear();
+    claudeProjectDirCache.clear();
+    claudePhaseCache.clear();
+
+    const first = await detectClaudePhase(sessionId, cwd, startedAt, undefined, runtimePaths, {
+      cacheRoot,
+      nowMs: 1_000,
+    });
+
+    assert.deepEqual(first, {
+      phase: "done",
+      lastResponseAt: new Date("2026-03-31T10:00:00.000Z").getTime() / 1000,
+      lastActivityAt: new Date("2026-03-31T10:00:00.000Z").getTime() / 1000,
+    });
+
+    claudeSessionRegistry.clear();
+    claudeProjectDirCache.clear();
+    claudePhaseCache.clear();
+
+    const second = await detectClaudePhase(sessionId, cwd, startedAt, undefined, runtimePaths, {
+      cacheRoot,
+      nowMs: 2_000,
+      openFile: async () => {
+        throw new Error("shared cache miss");
+      },
+    });
+
+    assert.deepEqual(second, first);
+  });
+});
+
+describe("shared Codex phase cache", () => {
+  it("reuses Codex phase results across in-memory cache clears", async () => {
+    const cacheRoot = await mkdtemp(join(tmpdir(), "marmonitor-codex-phase-cache-"));
+    const sessionsRoot = await mkdtemp(join(tmpdir(), "marmonitor-codex-sessions-"));
+    const now = new Date();
+    const yyyy = now.getFullYear().toString();
+    const mm = String(now.getMonth() + 1).padStart(2, "0");
+    const dd = String(now.getDate()).padStart(2, "0");
+    const dayDir = join(sessionsRoot, yyyy, mm, dd);
+    const sessionFile = join(dayDir, "codex-phase-shared.jsonl");
+
+    await mkdir(dayDir, { recursive: true });
+    await writeFile(
+      sessionFile,
+      `${[
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "codex-phase-shared",
+            cwd: "/tmp/shared-codex-phase",
+            timestamp: new Date("2026-03-31T10:00:00.000Z").toISOString(),
+            model_provider: "gpt-5.4",
+          },
+        }),
+        JSON.stringify({
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+          },
+        }),
+      ].join("\n")}\n`,
+      "utf8",
+    );
+
+    codexPhaseCache.clear();
+    const first = await detectCodexPhase(sessionFile, undefined, {
+      cacheRoot,
+      nowMs: 1_000,
+    });
+
+    assert.equal(first, "done");
+
+    codexPhaseCache.clear();
+    const second = await detectCodexPhase(sessionFile, undefined, {
+      cacheRoot,
+      nowMs: 2_000,
+      openFile: async () => {
+        throw new Error("shared cache miss");
+      },
+    });
+
+    assert.equal(second, "done");
   });
 });
