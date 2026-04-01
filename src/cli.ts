@@ -25,10 +25,17 @@ import {
   printStatus,
   printStatusJson,
   printStatusline,
+  renderJumpAttentionChooser,
   renderStatusline,
   renderUnavailableStatusline,
 } from "./output/index.js";
-import { selectJumpAttentionItem, selectUnmatchedTargets } from "./output/utils.js";
+import {
+  buildJumpAttentionItems,
+  parseSelectionInput,
+  selectJumpAttentionItem,
+  selectJumpAttentionItemOnPage,
+  selectUnmatchedTargets,
+} from "./output/utils.js";
 import { TERMINAL_RESTORE_SEQUENCE, formatProcessFailure } from "./process-safety.js";
 import { detectClaudePhase } from "./scanner/claude.js";
 import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./scanner/codex.js";
@@ -37,6 +44,7 @@ import { parseGeminiSession } from "./scanner/gemini.js";
 import { scanAgents } from "./scanner/index.js";
 import { detectCliStdoutPhase } from "./scanner/status.js";
 import { captureTmuxPaneOutput, jumpToAgent, resolveTmuxJumpTarget } from "./tmux/index.js";
+import { getClientTty, jumpBack } from "./tmux/jump-anchor.js";
 import type { AgentSession } from "./types.js";
 import { VERSION } from "./version.js";
 
@@ -145,6 +153,12 @@ function buildHelpAppendix(): string {
     "  [Dead]      Session file exists but process gone",
     "  [Unmatched] AI process without matching session",
     "",
+    "Common settings:",
+    "  display.attentionLimit / display.statuslineAttentionLimit",
+    "  integration.tmux.badgeStyle",
+    "  integration.tmux.keys.*",
+    "  paths.* (runtime data path overrides)",
+    "",
     "Default tmux shortcuts:",
     "  Prefix+a      Attention popup",
     "  Prefix+j      Jump popup",
@@ -168,16 +182,24 @@ function clearScreen(): void {
   }
 }
 
-async function promptSelectionKey(maxChoice: number): Promise<number | undefined> {
+async function promptSelectionAction(
+  maxChoice: number,
+  currentPage = 1,
+  totalPages = 1,
+): Promise<ReturnType<typeof parseSelectionInput>> {
   if (!process.stdin.isTTY || maxChoice < 1) return undefined;
 
   const prompt =
-    maxChoice >= 10
-      ? "\nPress 1-9 to jump, 0 for item 10, q to cancel: "
-      : `\nPress 1-${maxChoice} to jump, q to cancel: `;
+    totalPages > 1
+      ? maxChoice >= 10
+        ? "\n←/→ page, 1-9 to jump, 0 for 10, q to cancel: "
+        : `\n←/→ page, 1-${maxChoice} to jump, q to cancel: `
+      : maxChoice >= 10
+        ? "\n1-9 to jump, 0 for 10, q to cancel: "
+        : `\n1-${maxChoice} to jump, q to cancel: `;
   process.stdout.write(prompt);
 
-  return await new Promise<number | undefined>((resolve) => {
+  return await new Promise<ReturnType<typeof parseSelectionInput>>((resolve) => {
     const stdin = process.stdin;
     const restoreRawMode = "setRawMode" in stdin && typeof stdin.setRawMode === "function";
 
@@ -194,24 +216,10 @@ async function promptSelectionKey(maxChoice: number): Promise<number | undefined
         cleanup();
         exitWithCleanup(130);
       }
-      if (input === "\u001b" || input === "q" || input === "Q") {
+      const action = parseSelectionInput(input, maxChoice, currentPage, totalPages);
+      if (action) {
         cleanup();
-        resolve(undefined);
-        return;
-      }
-
-      const trimmed = input.trim();
-      if (/^[1-9]$/.test(trimmed)) {
-        const selection = Number.parseInt(trimmed, 10);
-        if (selection <= maxChoice) {
-          cleanup();
-          resolve(selection);
-        }
-        return;
-      }
-      if (trimmed === "0" && maxChoice >= 10) {
-        cleanup();
-        resolve(10);
+        resolve(action);
       }
     };
 
@@ -293,6 +301,7 @@ function buildMinimalConfigSample(): string {
       },
       integration: {
         tmux: {
+          badgeStyle: "basic",
           keys: {
             attentionPopup: "a",
             jumpPopup: "j",
@@ -329,6 +338,7 @@ function buildAdvancedConfigSample(): string {
       },
       integration: {
         tmux: {
+          badgeStyle: "basic",
           keys: {
             attentionPopup: "a",
             jumpPopup: "j",
@@ -551,12 +561,26 @@ program
           console.log(renderUnavailableStatusline(opts.statuslineFormat));
           return;
         }
+        // Check jump-back anchor for indicator
+        let hasJumpAnchor = false;
+        if (opts.statuslineFormat === "tmux-badges") {
+          const { tmpdir: td } = await import("node:os");
+          const { join: pj } = await import("node:path");
+          const { loadJumpAnchor } = await import("./tmux/jump-anchor.js");
+          const tty = await getClientTty();
+          if (tty) {
+            hasJumpAnchor = Boolean(
+              await loadJumpAnchor(pj(td(), "marmonitor", "jump-anchors.json"), tty),
+            );
+          }
+        }
         const rendered = await renderStatusline(
           agents,
           opts.statuslineFormat,
           attentionLimit,
           width,
           config.integration.tmux.badgeStyle,
+          hasJumpAnchor,
         );
         await writeCachedStatusline(opts.statuslineFormat, attentionLimit, width, rendered);
         console.log(rendered);
@@ -621,12 +645,37 @@ program
         console.error("--interactive requires an interactive terminal.");
         process.exit(1);
       }
-      printJumpAttentionChooser(agents, interactiveLimit);
-      const selection = await promptSelectionKey(interactiveLimit);
-      if (selection === undefined) return;
-      const item = selectJumpAttentionItem(agents, selection);
+      const totalItems = buildJumpAttentionItems(agents).length;
+      const totalPages = Math.max(1, Math.ceil(totalItems / interactiveLimit));
+      let currentPage = 1;
+      let item: ReturnType<typeof selectJumpAttentionItemOnPage>;
+      while (true) {
+        clearScreen();
+        console.log(renderJumpAttentionChooser(agents, currentPage, interactiveLimit));
+        const pageItemCount = Math.min(
+          interactiveLimit,
+          Math.max(totalItems - (currentPage - 1) * interactiveLimit, 0),
+        );
+        const action = await promptSelectionAction(pageItemCount, currentPage, totalPages);
+        if (!action || action.kind === "cancel") return;
+        if (action.kind === "next") {
+          currentPage = Math.min(currentPage + 1, totalPages);
+          continue;
+        }
+        if (action.kind === "prev") {
+          currentPage = Math.max(currentPage - 1, 1);
+          continue;
+        }
+        item = selectJumpAttentionItemOnPage(
+          agents,
+          currentPage,
+          action.selection,
+          interactiveLimit,
+        );
+        break;
+      }
       if (!item) {
-        console.error(`Invalid selection: ${selection}`);
+        console.error("Invalid selection.");
         process.exit(1);
       }
       const agent = agents.find((candidate) => candidate.pid === item.pid);
@@ -822,12 +871,29 @@ program
         config.display.attentionLimit,
         true,
       );
-      printJumpAttentionChooser(agents, limit);
-      const selection = await promptSelectionKey(limit);
-      if (selection === undefined) return;
-      const item = selectJumpAttentionItem(agents, selection);
+      const totalItems = buildJumpAttentionItems(agents).length;
+      const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+      let currentPage = 1;
+      let item: ReturnType<typeof selectJumpAttentionItemOnPage>;
+      while (true) {
+        clearScreen();
+        console.log(renderJumpAttentionChooser(agents, currentPage, limit));
+        const pageItemCount = Math.min(limit, Math.max(totalItems - (currentPage - 1) * limit, 0));
+        const action = await promptSelectionAction(pageItemCount, currentPage, totalPages);
+        if (!action || action.kind === "cancel") return;
+        if (action.kind === "next") {
+          currentPage = Math.min(currentPage + 1, totalPages);
+          continue;
+        }
+        if (action.kind === "prev") {
+          currentPage = Math.max(currentPage - 1, 1);
+          continue;
+        }
+        item = selectJumpAttentionItemOnPage(agents, currentPage, action.selection, limit);
+        break;
+      }
       if (!item) {
-        console.error(`Invalid selection: ${selection}`);
+        console.error("Invalid selection.");
         process.exit(1);
       }
       pid = item.pid;
@@ -875,6 +941,24 @@ program
       printJumpResult(result);
     }
     if (!result.found) process.exit(1);
+  });
+
+program
+  .command("jump-back")
+  .description("Return to the tmux pane you were in before the last jump")
+  .option("--client-tty <tty>", "Override client tty (auto-detected if omitted)")
+  .action(async (opts) => {
+    const { tmpdir: td } = await import("node:os");
+    const { join: pjoin } = await import("node:path");
+    const anchorPath = pjoin(td(), "marmonitor", "jump-anchors.json");
+    const tty = opts.clientTty ?? (await getClientTty());
+    if (!tty) {
+      console.error("Cannot detect tmux client. Are you inside tmux?");
+      process.exit(1);
+    }
+    const result = await jumpBack(anchorPath, tty);
+    console.log(result.message);
+    if (!result.success) process.exit(1);
   });
 
 program

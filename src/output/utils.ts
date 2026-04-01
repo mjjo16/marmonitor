@@ -537,6 +537,55 @@ export function selectJumpAttentionItem(
   return buildJumpAttentionItems(agents)[selection - 1];
 }
 
+export function selectJumpAttentionItemOnPage(
+  agents: AgentSession[],
+  page: number,
+  selection: number,
+  pageSize = 10,
+): AttentionItem | undefined {
+  if (!Number.isInteger(selection) || selection < 1) return undefined;
+  if (!Number.isInteger(page) || page < 1) return undefined;
+  if (!Number.isInteger(pageSize) || pageSize < 1) return undefined;
+  const start = (page - 1) * pageSize;
+  return buildJumpAttentionItems(agents)[start + selection - 1];
+}
+
+export type SelectionAction =
+  | { kind: "cancel" }
+  | { kind: "next" }
+  | { kind: "prev" }
+  | { kind: "select"; selection: number };
+
+export function parseSelectionInput(
+  input: string,
+  maxChoice: number,
+  currentPage = 1,
+  totalPages = 1,
+): SelectionAction | undefined {
+  if (input === "\u001b" || input === "q" || input === "Q") {
+    return { kind: "cancel" };
+  }
+  if (input === "\u001b[C" && currentPage < totalPages) {
+    return { kind: "next" };
+  }
+  if (input === "\u001b[D" && currentPage > 1) {
+    return { kind: "prev" };
+  }
+
+  const trimmed = input.trim();
+  if (/^[1-9]$/.test(trimmed)) {
+    const selection = Number.parseInt(trimmed, 10);
+    if (selection <= maxChoice) {
+      return { kind: "select", selection };
+    }
+    return undefined;
+  }
+  if (trimmed === "0" && maxChoice >= 10) {
+    return { kind: "select", selection: 10 };
+  }
+  return undefined;
+}
+
 export function buildAttentionFocusText(
   items: AttentionItem[],
   maxCount = 3,
@@ -721,13 +770,15 @@ export function buildTmuxBadgeBar(
   snapshot: StatuslineSnapshot,
   focusText?: string,
   badgeStyle: BadgeStyle = "basic",
+  hasJumpAnchor = false,
 ): string {
   const theme = resolveTheme(badgeStyle);
   const { agents, alerts } = buildStatusPills(snapshot);
   const agentPills = agents.map((pill) => renderBadge(theme, pill.label, pill.fg, pill.bg));
   const alertPills = alerts.map((pill) => renderBadge(theme, pill.label, pill.fg, pill.bg));
+  const jumpBack = hasJumpAnchor ? theme.jumpBack : "";
   const focus = focusText ? renderFocus(theme, focusText) : "";
-  return [agentPills.join(" "), alertPills.join(" "), focus].filter(Boolean).join("  ");
+  return [agentPills.join(" "), alertPills.join(" "), jumpBack, focus].filter(Boolean).join("  ");
 }
 
 export function buildTmuxAttentionPills(

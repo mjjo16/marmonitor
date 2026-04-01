@@ -43,13 +43,15 @@ bind-key A display-popup -E -w 70 -h 18 "cd ~/Documents/mjjo/marmonitor && node 
 Choose one attention item and jump directly from the popup:
 
 ```tmux
-bind-key A display-popup -E -w 120 -h 32 "cd ~/Documents/mjjo/marmonitor && node bin/marmonitor.js attention --interactive --limit 12"
+bind-key A display-popup -E -w 120 -h 42 "cd ~/Documents/mjjo/marmonitor && node bin/marmonitor.js attention --interactive --limit 12"
 ```
 
 - shows only jumpable items
 - by default follows `display.attentionLimit` from `settings.json`
-- press `1-9` once to jump
-- press `0` for item 10
+- when more than 10 items exist, use `←` / `→` to move pages
+- page indicator uses `< 1/2 >` style in the popup header
+- press `1-9` to jump
+- press `0` for `10`
 - press `q` to cancel
 
 ## Interactive jump popup
@@ -57,8 +59,13 @@ bind-key A display-popup -E -w 120 -h 32 "cd ~/Documents/mjjo/marmonitor && node
 Choose one attention item and jump to its existing pane:
 
 ```tmux
-bind-key J display-popup -E -w 120 -h 32 "cd ~/Documents/mjjo/marmonitor && node bin/marmonitor.js jump --attention"
+bind-key J display-popup -E -w 120 -h 42 "cd ~/Documents/mjjo/marmonitor && node bin/marmonitor.js jump --attention"
 ```
+
+- when more than 10 items exist, use `←` / `→` to move pages
+- press `1-9` to jump
+- press `0` for `10`
+- press `q` to cancel
 
 ## Jump to existing pane
 
