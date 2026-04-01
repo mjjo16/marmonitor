@@ -1100,6 +1100,58 @@ program
   });
 
 program
+  .command("update-integration")
+  .description("Check how to sync the installed tmux integration")
+  .option("--quiet", "Suppress non-essential output")
+  .action(async (opts: { quiet?: boolean }) => {
+    const { detectTmuxIntegrationMode, getMarmonitorPluginDir } = await import("./tmux/setup.js");
+    const { homedir } = await import("node:os");
+    const { join } = await import("node:path");
+    const confPath = join(homedir(), ".tmux.conf");
+    const pluginDir = getMarmonitorPluginDir();
+    const mode = await detectTmuxIntegrationMode(confPath, pluginDir);
+
+    if (mode === "local") {
+      if (!opts.quiet) {
+        console.log("Local marmonitor-tmux run-shell detected.");
+        console.log("Your local repo changes are already active after tmux reload.");
+      }
+      return;
+    }
+
+    if (!mode) {
+      if (!opts.quiet) {
+        console.log("tmux integration is not configured. Run: marmonitor setup tmux");
+      }
+      return;
+    }
+
+    if (mode === "missing") {
+      if (!opts.quiet) {
+        console.log("tmux integration is configured, but marmonitor-tmux is not installed yet.");
+        console.log("Press prefix+I in tmux to install the plugin.");
+      }
+      return;
+    }
+
+    if (mode === "not_git") {
+      if (!opts.quiet) {
+        console.log("marmonitor-tmux exists but is not a git checkout.");
+        console.log(`Reinstall the plugin or update it manually: ${pluginDir}`);
+      }
+      return;
+    }
+
+    if (!opts.quiet) {
+      console.log("marmonitor-tmux TPM plugin detected.");
+      console.log("Update path:");
+      console.log("  1. Press prefix+U in tmux");
+      console.log(`  2. Or run: git -C ${pluginDir} pull --ff-only`);
+      console.log("  3. Reload tmux if keybindings or popup sizing changed");
+    }
+  });
+
+program
   .command("uninstall-integration")
   .description("Remove marmonitor settings from tmux.conf")
   .action(async () => {
