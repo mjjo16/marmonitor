@@ -766,6 +766,10 @@ function tmuxAttentionSegment(
   return `#[fg=${bg},bg=#1e1e2e]#[bold,fg=#11111b,bg=${bg}] ${index} #[fg=#313244,bg=${bg}]#[fg=#cdd6f4,bg=#313244] ${label} #[fg=#313244,bg=#1e1e2e]#[default]`;
 }
 
+function tmuxUserRange(value: string, content: string): string {
+  return `#[range=user|${value}]${content}#[norange]`;
+}
+
 export function buildTmuxBadgeBar(
   snapshot: StatuslineSnapshot,
   focusText?: string,
@@ -776,7 +780,7 @@ export function buildTmuxBadgeBar(
   const { agents, alerts } = buildStatusPills(snapshot);
   const agentPills = agents.map((pill) => renderBadge(theme, pill.label, pill.fg, pill.bg));
   const alertPills = alerts.map((pill) => renderBadge(theme, pill.label, pill.fg, pill.bg));
-  const jumpBack = hasJumpAnchor ? theme.jumpBack : "";
+  const jumpBack = hasJumpAnchor ? tmuxUserRange("jump-back", theme.jumpBack) : "";
   const focus = focusText ? renderFocus(theme, focusText) : "";
   return [agentPills.join(" "), alertPills.join(" "), jumpBack, focus].filter(Boolean).join("  ");
 }
@@ -824,7 +828,10 @@ export function buildTmuxAttentionPills(
               : time
                 ? `⚠${agent} ${path} ${time}`
                 : `⚠${agent} ${path}`;
-    return renderAttention(theme, index + 1, label, attentionBg(item.kind));
+    return tmuxUserRange(
+      `pid:${item.pid}`,
+      renderAttention(theme, index + 1, label, attentionBg(item.kind)),
+    );
   });
 
   return segments.join("  ");

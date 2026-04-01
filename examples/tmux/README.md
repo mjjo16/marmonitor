@@ -101,6 +101,31 @@ bind-key -n M-5 run-shell -b "cd ~/Documents/mjjo/marmonitor && node bin/marmoni
 - on macOS this usually maps to `Option + 1..5`
 - `run-shell -b` + output redirection is intentional so tmux does not show a temporary `Jumped to ...` screen
 
+## Jump-back
+
+Return to the pane you were in before the current marmonitor jump chain:
+
+```bash
+node bin/marmonitor.js jump-back
+```
+
+Recommended tmux binding without prefix:
+
+```tmux
+bind-key -n M-6 run-shell -b "cd ~/Documents/mjjo/marmonitor && node bin/marmonitor.js jump-back >/dev/null 2>&1"
+```
+
+- current behavior keeps the **first pane before the jump chain**
+- repeated `Option+1..5` jumps do not overwrite that origin
+- after successful jump-back, the anchor is cleared
+
+## Statusline click interaction
+
+When using the tmux plugin, the second statusline row can be clicked:
+
+- click attention pills to jump to that session
+- click the `↩` pill to trigger jump-back
+
 ## Notes
 
 - `tmux-badges` is optimized for tmux status bar rendering

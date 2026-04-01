@@ -45,6 +45,7 @@ import { scanAgents } from "./scanner/index.js";
 import { detectCliStdoutPhase } from "./scanner/status.js";
 import { captureTmuxPaneOutput, jumpToAgent, resolveTmuxJumpTarget } from "./tmux/index.js";
 import { getClientTty, jumpBack } from "./tmux/jump-anchor.js";
+import { findClickedAgent, parseStatusClickToken } from "./tmux/status-click.js";
 import type { AgentSession } from "./types.js";
 import { VERSION } from "./version.js";
 
@@ -959,6 +960,34 @@ program
     const result = await jumpBack(anchorPath, tty);
     console.log(result.message);
     if (!result.success) process.exit(1);
+  });
+
+program
+  .command("status-click")
+  .description("Internal tmux statusline click handler")
+  .argument("[token]", "tmux mouse status range token")
+  .option("--client-tty <tty>", "Override client tty (auto-detected if omitted)")
+  .action(async (token: string | undefined, opts) => {
+    const action = parseStatusClickToken(token);
+    if (!action) return;
+
+    if (action.kind === "jump-back") {
+      const { tmpdir: td } = await import("node:os");
+      const { join: pjoin } = await import("node:path");
+      const anchorPath = pjoin(td(), "marmonitor", "jump-anchors.json");
+      const tty = opts.clientTty ?? (await getClientTty());
+      if (!tty) process.exit(1);
+      const result = await jumpBack(anchorPath, tty);
+      if (!result.success) process.exit(1);
+      return;
+    }
+
+    const agents = await getAgentsSnapshot();
+    if (agents.length === 0) process.exit(1);
+    const agent = findClickedAgent(agents, action);
+    if (!agent) process.exit(1);
+    const result = await jumpToAgent(agent);
+    if (!result.executed) process.exit(1);
   });
 
 program
