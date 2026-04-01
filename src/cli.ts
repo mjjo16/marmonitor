@@ -31,6 +31,7 @@ import { selectJumpAttentionItem, selectUnmatchedTargets } from "./output/utils.
 import { TERMINAL_RESTORE_SEQUENCE, formatProcessFailure } from "./process-safety.js";
 import { detectClaudePhase } from "./scanner/claude.js";
 import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./scanner/codex.js";
+import { isDaemonRunning, readDaemonPid, readDaemonSnapshot } from "./scanner/daemon-utils.js";
 import { parseGeminiSession } from "./scanner/gemini.js";
 import { scanAgents } from "./scanner/index.js";
 import { detectCliStdoutPhase } from "./scanner/status.js";
@@ -461,14 +462,6 @@ function statuslineCacheFile(format: string, attentionLimit: number, width?: num
   return join(tmpdir(), "marmonitor", `statusline-${format}-${attentionLimit}-${widthKey}.txt`);
 }
 
-function snapshotCacheFile(enrichmentMode: "full" | "light", showDead: boolean): string {
-  return join(
-    tmpdir(),
-    "marmonitor",
-    `snapshot-${enrichmentMode}-${showDead ? "dead" : "alive"}.json`,
-  );
-}
-
 async function readCachedStatusline(
   format: string,
   attentionLimit: number,
@@ -500,73 +493,22 @@ async function writeCachedStatusline(
   }
 }
 
-async function readCachedSnapshot(
-  enrichmentMode: "full" | "light",
-  showDead: boolean,
-  ttlMs: number,
-): Promise<AgentSession[] | undefined> {
-  const path = snapshotCacheFile(enrichmentMode, showDead);
-  try {
-    const fileStat = await stat(path);
-    if (Date.now() - fileStat.mtimeMs > ttlMs) return undefined;
-    return JSON.parse(await readFile(path, "utf-8")) as AgentSession[];
-  } catch {
-    return undefined;
-  }
+const DAEMON_DIR = join(tmpdir(), "marmonitor");
+const DAEMON_PID_PATH = join(DAEMON_DIR, "daemon.pid");
+const DAEMON_SNAPSHOT_PATH = join(DAEMON_DIR, "daemon-snapshot.json");
+const DAEMON_NOT_RUNNING = "Daemon not running. Run: marmonitor start";
+
+async function getAgentsSnapshot(): Promise<AgentSession[]> {
+  return (await readDaemonSnapshot(DAEMON_SNAPSHOT_PATH, 5_000)) as AgentSession[];
 }
 
-async function writeCachedSnapshot(
-  enrichmentMode: "full" | "light",
-  showDead: boolean,
-  agents: AgentSession[],
-): Promise<void> {
-  const path = snapshotCacheFile(enrichmentMode, showDead);
-  try {
-    await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
-    await writeFile(path, JSON.stringify(agents), "utf-8");
-  } catch {
-    // snapshot cache failures must never break command execution
+async function requireDaemonSnapshot(): Promise<AgentSession[]> {
+  const agents = await getAgentsSnapshot();
+  if (agents.length === 0) {
+    console.error(DAEMON_NOT_RUNNING);
+    process.exit(1);
   }
-}
-
-const SNAPSHOT_LOCK_PATH = join(tmpdir(), "marmonitor", "snapshot.lock");
-const SNAPSHOT_LOCK_TTL_MS = 10_000;
-
-async function getAgentsSnapshot(
-  config: Awaited<ReturnType<typeof loadConfig>>,
-  options: { enrichmentMode?: "full" | "light"; ttlMs?: number } = {},
-): Promise<AgentSession[]> {
-  const enrichmentMode = options.enrichmentMode ?? "full";
-  const ttlMs = options.ttlMs ?? config.performance.snapshotTtlMs;
-  const useCache = ttlMs > 0;
-
-  if (useCache) {
-    const cached = await readCachedSnapshot(enrichmentMode, config.display.showDead, ttlMs);
-    if (cached) return cached;
-  }
-
-  // Acquire lock to prevent concurrent scans from duplicate work
-  const { acquireSnapshotLock, releaseSnapshotLock } = await import("./scanner/snapshot-lock.js");
-  const acquired = await acquireSnapshotLock(SNAPSHOT_LOCK_PATH, SNAPSHOT_LOCK_TTL_MS);
-
-  if (!acquired && useCache) {
-    // Another process is scanning — wait briefly then try cache again
-    await new Promise((r) => setTimeout(r, 200));
-    const retryCache = await readCachedSnapshot(enrichmentMode, config.display.showDead, ttlMs * 3);
-    if (retryCache) return retryCache;
-  }
-
-  try {
-    const agents = await scanAgents(config, { enrichmentMode });
-    if (useCache) {
-      await writeCachedSnapshot(enrichmentMode, config.display.showDead, agents);
-    }
-    return agents;
-  } finally {
-    if (acquired) {
-      await releaseSnapshotLock(SNAPSHOT_LOCK_PATH);
-    }
-  }
+  return agents;
 }
 
 program
@@ -603,7 +545,11 @@ program
           console.log(cached);
           return;
         }
-        const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
+        const agents = await getAgentsSnapshot();
+        if (agents.length === 0) {
+          console.log(renderUnavailableStatusline(opts.statuslineFormat));
+          return;
+        }
         const rendered = await renderStatusline(
           agents,
           opts.statuslineFormat,
@@ -625,12 +571,8 @@ program
   .command("status")
   .description("Show current AI agent status")
   .option("--json", "Output as JSON")
-  .option("--config <path>", "Path to settings.json")
-  .option("--show-dead", "Include dead sessions")
   .action(async (opts) => {
-    const config = await loadConfig(resolveConfigPath(opts));
-    if (opts.showDead) config.display.showDead = true;
-    const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
+    const agents = await requireDaemonSnapshot();
     if (opts.json) {
       await printStatusJson(agents);
     } else {
@@ -660,8 +602,8 @@ program
   .option("--limit <n>", "Max items to show", "12")
   .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
+    const agents = await requireDaemonSnapshot();
     const config = await loadConfig(resolveConfigPath(opts));
-    const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
     const limit = resolveAttentionLimit(opts, config.display.attentionLimit);
     const interactiveLimit = resolveAttentionLimit(opts, config.display.attentionLimit, true);
     if (opts.interactive && opts.json) {
@@ -851,8 +793,8 @@ program
   .option("--json", "Output as JSON")
   .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
+    const agents = await requireDaemonSnapshot();
     const config = await loadConfig(resolveConfigPath(opts));
-    const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
     const useAttention = Boolean(opts.attention);
     const useAttentionIndex = typeof opts.attentionIndex === "string";
     const usePid = typeof opts.pid === "string";
@@ -933,26 +875,18 @@ program
   .command("dock")
   .description("Compact persistent monitor for tmux pane")
   .option("--interval <sec>", "Refresh interval in seconds", "2")
-  .option("--detail-interval <sec>", "Heavy enrichment interval", "30")
   .option("--lines <n>", "Max display lines", "12")
-  .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
     const intervalMs = Math.max(Number(opts.interval) || 2, 2) * 1000;
-    const detailMs = Math.max(Number(opts.detailInterval) || 30, 5) * 1000;
     const maxLines = Number(opts.lines) || 12;
-    const config = await loadConfig(resolveConfigPath(opts));
-    let lastHeavyAt = 0;
 
+    let agents = await requireDaemonSnapshot();
     while (true) {
-      const now = Date.now();
-      const needsHeavy = lastHeavyAt === 0 || now - lastHeavyAt >= detailMs;
-      const agents = await scanAgents(config, {
-        enrichmentMode: needsHeavy ? "full" : "light",
-      });
-      if (needsHeavy) lastHeavyAt = now;
       clearScreen();
       await printDock(agents, maxLines);
       await sleep(intervalMs);
+      agents = await getAgentsSnapshot();
+      if (agents.length === 0) agents = []; // daemon stopped mid-loop
     }
   });
 
@@ -960,31 +894,13 @@ program
   .command("watch")
   .description("Refresh agent status in a long-lived loop")
   .option("--interval <sec>", "Refresh interval in seconds", "2")
-  .option("--detail-interval <sec>", "Heavy enrichment refresh interval in seconds", "30")
   .option("--json", "Output as JSON")
-  .option("--config <path>", "Path to settings.json")
-  .option("--show-dead", "Include dead sessions")
   .action(async (opts) => {
     const intervalSec = Number(opts.interval);
-    const detailIntervalSec = Number(opts.detailInterval);
-    const intervalMs =
-      Number.isFinite(intervalSec) && intervalSec > 0 ? intervalSec * 1000 : 10_000;
-    const detailIntervalMs =
-      Number.isFinite(detailIntervalSec) && detailIntervalSec > 0
-        ? detailIntervalSec * 1000
-        : 30_000;
+    const intervalMs = Number.isFinite(intervalSec) && intervalSec > 0 ? intervalSec * 1000 : 2_000;
 
-    const config = await loadConfig(resolveConfigPath(opts));
-    if (opts.showDead) config.display.showDead = true;
-    let lastHeavyAt = 0;
-
+    let agents = await requireDaemonSnapshot();
     while (true) {
-      const now = Date.now();
-      const needsHeavy = lastHeavyAt === 0 || now - lastHeavyAt >= detailIntervalMs;
-      const agents = await scanAgents(config, {
-        enrichmentMode: needsHeavy ? "full" : "light",
-      });
-      if (needsHeavy) lastHeavyAt = now;
       clearScreen();
       if (opts.json) {
         await printStatusJson(agents);
@@ -992,6 +908,8 @@ program
         await printStatus(agents);
       }
       await sleep(intervalMs);
+      agents = await getAgentsSnapshot();
+      if (agents.length === 0) agents = []; // daemon stopped mid-loop
     }
   });
 
@@ -1051,6 +969,9 @@ program
     await addMarmonitorPlugin(confPath);
     console.log("✓ Added marmonitor-tmux plugin to ~/.tmux.conf");
     console.log("Press prefix+I inside tmux to activate.");
+
+    // Start daemon if not already running
+    await startDaemon();
   });
 
 program
@@ -1069,6 +990,9 @@ program
       console.log("No marmonitor settings found in ~/.tmux.conf");
     }
 
+    // Stop daemon
+    await stopDaemon();
+
     // Restore tmux memory state (status bar → 1 line, remove status-format[1])
     try {
       const { execFile: ef } = await import("node:child_process");
@@ -1080,6 +1004,64 @@ program
     } catch {
       console.log("  tmux not running — restart tmux to apply changes");
     }
+
+    console.log("\nTo complete removal:");
+    console.log("  $ npm uninstall -g marmonitor");
+    console.log("\nOptional cleanup:");
+    console.log("  $ rm -rf ~/.config/marmonitor    # settings & session history");
+    console.log("  $ rm -rf ~/.tmux/plugins/marmonitor-tmux  # tpm plugin");
+  });
+
+async function startDaemon(): Promise<number | undefined> {
+  if (await isDaemonRunning(DAEMON_PID_PATH)) {
+    const pid = await readDaemonPid(DAEMON_PID_PATH);
+    console.log(`Daemon already running (PID: ${pid})`);
+    return undefined;
+  }
+  const { fork } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const here = dirname(fileURLToPath(import.meta.url));
+  const child = fork(join(here, "..", "bin", "daemon.js"), [], { detached: true, stdio: "ignore" });
+  child.unref();
+  console.log(`✓ Daemon started (PID: ${child.pid})`);
+  return child.pid ?? undefined;
+}
+
+async function stopDaemon(): Promise<boolean> {
+  const pid = await readDaemonPid(DAEMON_PID_PATH);
+  if (!pid || !(await isDaemonRunning(DAEMON_PID_PATH))) {
+    console.log("Daemon is not running.");
+    return false;
+  }
+  process.kill(pid, "SIGTERM");
+  console.log(`✓ Daemon stopped (PID: ${pid})`);
+  return true;
+}
+
+program
+  .command("start")
+  .description("Start background scan daemon")
+  .action(async () => {
+    await startDaemon();
+    process.exit(0);
+  });
+
+program
+  .command("stop")
+  .description("Stop background scan daemon")
+  .action(async () => {
+    await stopDaemon();
+    process.exit(0);
+  });
+
+program
+  .command("restart")
+  .description("Restart background scan daemon")
+  .action(async () => {
+    await stopDaemon();
+    await new Promise((r) => setTimeout(r, 500));
+    await startDaemon();
+    process.exit(0);
   });
 
 installProcessSafetyHandlers();
