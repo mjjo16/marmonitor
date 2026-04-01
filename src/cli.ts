@@ -529,6 +529,9 @@ async function writeCachedSnapshot(
   }
 }
 
+const SNAPSHOT_LOCK_PATH = join(tmpdir(), "marmonitor", "snapshot.lock");
+const SNAPSHOT_LOCK_TTL_MS = 10_000;
+
 async function getAgentsSnapshot(
   config: Awaited<ReturnType<typeof loadConfig>>,
   options: { enrichmentMode?: "full" | "light"; ttlMs?: number } = {},
@@ -542,11 +545,28 @@ async function getAgentsSnapshot(
     if (cached) return cached;
   }
 
-  const agents = await scanAgents(config, { enrichmentMode });
-  if (useCache) {
-    await writeCachedSnapshot(enrichmentMode, config.display.showDead, agents);
+  // Acquire lock to prevent concurrent scans from duplicate work
+  const { acquireSnapshotLock, releaseSnapshotLock } = await import("./scanner/snapshot-lock.js");
+  const acquired = await acquireSnapshotLock(SNAPSHOT_LOCK_PATH, SNAPSHOT_LOCK_TTL_MS);
+
+  if (!acquired && useCache) {
+    // Another process is scanning — wait briefly then try cache again
+    await new Promise((r) => setTimeout(r, 200));
+    const retryCache = await readCachedSnapshot(enrichmentMode, config.display.showDead, ttlMs * 3);
+    if (retryCache) return retryCache;
   }
-  return agents;
+
+  try {
+    const agents = await scanAgents(config, { enrichmentMode });
+    if (useCache) {
+      await writeCachedSnapshot(enrichmentMode, config.display.showDead, agents);
+    }
+    return agents;
+  } finally {
+    if (acquired) {
+      await releaseSnapshotLock(SNAPSHOT_LOCK_PATH);
+    }
+  }
 }
 
 program
