@@ -622,6 +622,66 @@ describe("buildStatuslineSummary", () => {
     assert.match(text, /#\[fg=/);
   });
 
+  it("renders text badge style with fg color only", () => {
+    const snapshot = {
+      aliveCount: 3,
+      waitingCount: 0,
+      riskCount: 0,
+      stalledCount: 0,
+      unmatchedCount: 0,
+      activeCount: 2,
+      highCpuCount: 0,
+      thinkingCount: 0,
+      toolCount: 0,
+      claudeCount: 3,
+      codexCount: 0,
+      geminiCount: 0,
+    };
+    const text = buildTmuxBadgeBar(snapshot, undefined, "text");
+    assert.match(text, /Cl 3/);
+    assert.match(text, /#\[fg=/);
+  });
+
+  it("renders text-mono badge style in grayscale", () => {
+    const snapshot = {
+      aliveCount: 2,
+      waitingCount: 1,
+      riskCount: 0,
+      stalledCount: 0,
+      unmatchedCount: 0,
+      activeCount: 1,
+      highCpuCount: 0,
+      thinkingCount: 0,
+      toolCount: 0,
+      claudeCount: 2,
+      codexCount: 0,
+      geminiCount: 0,
+    };
+    const text = buildTmuxBadgeBar(snapshot, undefined, "text-mono");
+    assert.match(text, /Cl 2/);
+    assert.match(text, /#cdd6f4/);
+  });
+
+  it("defaults to basic style when badgeStyle not specified", () => {
+    const snapshot = {
+      aliveCount: 1,
+      waitingCount: 0,
+      riskCount: 0,
+      stalledCount: 0,
+      unmatchedCount: 0,
+      activeCount: 1,
+      highCpuCount: 0,
+      thinkingCount: 0,
+      toolCount: 0,
+      claudeCount: 1,
+      codexCount: 0,
+      geminiCount: 0,
+    };
+    const withoutStyle = buildTmuxBadgeBar(snapshot);
+    const withBasic = buildTmuxBadgeBar(snapshot, undefined, "basic");
+    assert.equal(withoutStyle, withBasic);
+  });
+
   it("builds shared status pills for terminal adapters", () => {
     const { agents, alerts } = buildStatusPills({
       aliveCount: 16,
