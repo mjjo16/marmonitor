@@ -37,7 +37,18 @@ export async function runDaemonLoop(
   await writeDaemonPid(pidPath, process.pid);
 
   const registry = new Map<string, SessionRegistryRecord>();
-  await loadRegistryFromFile(registryPath, registry);
+
+  // Restore registry if saved recently (within 10 minutes)
+  try {
+    const { stat: fsStat } = await import("node:fs/promises");
+    const fileStat = await fsStat(registryPath);
+    const ageMs = Date.now() - fileStat.mtimeMs;
+    if (ageMs < 10 * 60 * 1000) {
+      await loadRegistryFromFile(registryPath, registry);
+    }
+  } catch {
+    // file missing or inaccessible — start fresh
+  }
 
   let lastHeavyAt = 0;
   let running = true;
