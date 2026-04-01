@@ -44,15 +44,17 @@ export async function getSystemInfo(): Promise<SystemInfo> {
 
 // shortenPath, formatElapsed, formatTokens imported from ./utils.js
 
-/** Apply badge style to terminal chalk output: mono/plain disable colors */
+let monoMode = false;
+
+/** Apply badge style to terminal chalk output: mono uses bold/dim only */
 export function applyTerminalStyle(badgeStyle: BadgeStyle): void {
-  if (badgeStyle === "basic-mono" || badgeStyle === "text-mono") {
-    chalk.level = 0;
-  }
+  monoMode = badgeStyle === "basic-mono" || badgeStyle === "text-mono";
 }
 
 /** Agent name with distinct color */
 function agentLabel(name: string): string {
+  const label = name === "Claude Code" ? "Claude" : name;
+  if (monoMode) return chalk.bold.white(label);
   switch (name) {
     case "Claude Code":
       return chalk.hex("#D97706")("Claude"); // amber/orange
@@ -67,6 +69,20 @@ function agentLabel(name: string): string {
 
 /** Status icon/color */
 function statusLabel(status: AgentSession["status"]): string {
+  if (monoMode) {
+    switch (status) {
+      case "Active":
+        return chalk.white("[Active]   ");
+      case "Idle":
+        return chalk.gray("[Idle]     ");
+      case "Stalled":
+        return chalk.dim("[Stalled]  ");
+      case "Unmatched":
+        return chalk.dim("[Unmatched]");
+      case "Dead":
+        return chalk.dim("[Dead]     ");
+    }
+  }
   switch (status) {
     case "Active":
       return chalk.green("[Active]   ");
@@ -82,6 +98,12 @@ function statusLabel(status: AgentSession["status"]): string {
 }
 
 function displayStatusLabel(status: AgentSession["status"], phase?: SessionPhase): string {
+  if (monoMode) {
+    if (phase === "permission") return chalk.bold.white("[Allow]   ");
+    if (phase === "tool") return chalk.white("[Tool]    ");
+    if (phase === "thinking") return chalk.white("[Think]   ");
+    return statusLabel(status);
+  }
   if (phase === "permission") return chalk.red("[Allow]   ");
   if (phase === "tool") return chalk.green("[Tool]    ");
   if (phase === "thinking") return chalk.magenta("[Think]   ");
