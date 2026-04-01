@@ -1,4 +1,5 @@
 import type { AgentSession, SessionPhase } from "../types.js";
+import { renderAttention, renderBadge, renderFocus, resolveTheme } from "./badge-themes.js";
 
 /**
  * Pure utility functions for marmonitor.
@@ -697,13 +698,7 @@ export function buildStatuslineSummary(
   return standardParts.join(" | ");
 }
 
-function tmuxPill(label: string, fg: string, bg: string): string {
-  return `#[fg=${bg},bg=#1e1e2e]#[bold,fg=${fg},bg=${bg}] ${label} #[fg=${bg},bg=#1e1e2e]#[default]`;
-}
-
-function tmuxDetailBlock(label: string): string {
-  return `#[fg=#cdd6f4,bg=#313244] ${label} #[fg=#313244,bg=#1e1e2e]#[default]`;
-}
+export type BadgeStyle = "basic" | "basic-mono" | "text" | "text-mono";
 
 function attentionBg(kind: Exclude<AttentionKind, "unmatched">): string {
   if (kind === "permission") return "#f38ba8";
@@ -722,11 +717,16 @@ function tmuxAttentionSegment(
   return `#[fg=${bg},bg=#1e1e2e]#[bold,fg=#11111b,bg=${bg}] ${index} #[fg=#313244,bg=${bg}]#[fg=#cdd6f4,bg=#313244] ${label} #[fg=#313244,bg=#1e1e2e]#[default]`;
 }
 
-export function buildTmuxBadgeBar(snapshot: StatuslineSnapshot, focusText?: string): string {
+export function buildTmuxBadgeBar(
+  snapshot: StatuslineSnapshot,
+  focusText?: string,
+  badgeStyle: BadgeStyle = "basic",
+): string {
+  const theme = resolveTheme(badgeStyle);
   const { agents, alerts } = buildStatusPills(snapshot);
-  const agentPills = agents.map((pill) => tmuxPill(pill.label, pill.fg, pill.bg));
-  const alertPills = alerts.map((pill) => tmuxPill(pill.label, pill.fg, pill.bg));
-  const focus = focusText ? `#[fg=#bac2de,bg=#181825] ${focusText} #[default]` : "";
+  const agentPills = agents.map((pill) => renderBadge(theme, pill.label, pill.fg, pill.bg));
+  const alertPills = alerts.map((pill) => renderBadge(theme, pill.label, pill.fg, pill.bg));
+  const focus = focusText ? renderFocus(theme, focusText) : "";
   return [agentPills.join(" "), alertPills.join(" "), focus].filter(Boolean).join("  ");
 }
 
@@ -734,6 +734,7 @@ export function buildTmuxAttentionPills(
   items: AttentionItem[],
   maxCount = 5,
   width?: number,
+  badgeStyle: BadgeStyle = "basic",
 ): string | undefined {
   if (maxCount <= 0) return undefined;
   const layout = resolveStatuslineDetailLayout(width, maxCount);
@@ -744,8 +745,10 @@ export function buildTmuxAttentionPills(
     )
     .slice(0, layout.itemCount);
 
+  const theme = resolveTheme(badgeStyle);
+
   if (jumpItems.length === 0) {
-    return tmuxDetailBlock("no active");
+    return theme.empty;
   }
 
   const segments = jumpItems.map((item, index) => {
@@ -770,7 +773,7 @@ export function buildTmuxAttentionPills(
               : time
                 ? `⚠${agent} ${path} ${time}`
                 : `⚠${agent} ${path}`;
-    return tmuxAttentionSegment(index + 1, item.kind, label);
+    return renderAttention(theme, index + 1, label, attentionBg(item.kind));
   });
 
   return segments.join("  ");
