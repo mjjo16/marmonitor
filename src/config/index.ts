@@ -71,6 +71,7 @@ export interface MarmonitorConfig {
         dockToggle: string;
         directJump: string[];
       };
+      badgeStyle: "basic" | "basic-mono" | "text" | "text-mono";
     };
     wezterm: {
       enabled: boolean;
@@ -152,6 +153,7 @@ const DEFAULTS: MarmonitorConfig = {
         dockToggle: "m",
         directJump: ["M-1", "M-2", "M-3", "M-4", "M-5"],
       },
+      badgeStyle: "basic" as const,
     },
     wezterm: {
       enabled: false,

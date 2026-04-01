@@ -9,6 +9,7 @@ import type {
   WorkerProcess,
 } from "../types.js";
 import {
+  type BadgeStyle,
   type StatuslineFormat,
   buildAttentionFocusText,
   buildAttentionItems,
@@ -42,6 +43,13 @@ export async function getSystemInfo(): Promise<SystemInfo> {
 }
 
 // shortenPath, formatElapsed, formatTokens imported from ./utils.js
+
+/** Apply badge style to terminal chalk output: mono/plain disable colors */
+export function applyTerminalStyle(badgeStyle: BadgeStyle): void {
+  if (badgeStyle === "basic-mono" || badgeStyle === "text-mono") {
+    chalk.level = 0;
+  }
+}
 
 /** Agent name with distinct color */
 function agentLabel(name: string): string {
@@ -505,6 +513,7 @@ export async function renderStatusline(
   format: StatuslineFormat = "compact",
   attentionLimit = 5,
   width?: number,
+  badgeStyle: BadgeStyle = "basic",
 ): Promise<string> {
   const alive = agents.filter((a) => a.status !== "Dead" && a.status !== "Unmatched");
   const unmatched = agents.filter((a) => a.status === "Unmatched");
@@ -545,8 +554,9 @@ export async function renderStatusline(
       buildJumpAttentionItems(agents),
       attentionLimit,
       width,
+      badgeStyle,
     );
-    return buildTmuxBadgeBar(snapshot, focusText);
+    return buildTmuxBadgeBar(snapshot, focusText, badgeStyle);
   }
 
   if (format === "wezterm-pills") {

@@ -13,6 +13,7 @@ import {
 } from "./config/index.js";
 import { evaluateGuard, formatGuardOutput, parseHookEvent, readStdin } from "./guard/index.js";
 import {
+  applyTerminalStyle,
   printAttention,
   printAttentionJson,
   printCleanJson,
@@ -555,6 +556,7 @@ program
           opts.statuslineFormat,
           attentionLimit,
           width,
+          config.integration.tmux.badgeStyle,
         );
         await writeCachedStatusline(opts.statuslineFormat, attentionLimit, width, rendered);
         console.log(rendered);
@@ -571,8 +573,11 @@ program
   .command("status")
   .description("Show current AI agent status")
   .option("--json", "Output as JSON")
+  .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
     const agents = await requireDaemonSnapshot();
+    const config = await loadConfig(resolveConfigPath(opts));
+    applyTerminalStyle(config.integration.tmux.badgeStyle);
     if (opts.json) {
       await printStatusJson(agents);
     } else {
@@ -604,6 +609,7 @@ program
   .action(async (opts) => {
     const agents = await requireDaemonSnapshot();
     const config = await loadConfig(resolveConfigPath(opts));
+    applyTerminalStyle(config.integration.tmux.badgeStyle);
     const limit = resolveAttentionLimit(opts, config.display.attentionLimit);
     const interactiveLimit = resolveAttentionLimit(opts, config.display.attentionLimit, true);
     if (opts.interactive && opts.json) {
@@ -876,7 +882,10 @@ program
   .description("Compact persistent monitor for tmux pane")
   .option("--interval <sec>", "Refresh interval in seconds", "2")
   .option("--lines <n>", "Max display lines", "12")
+  .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
+    const config = await loadConfig(resolveConfigPath(opts));
+    applyTerminalStyle(config.integration.tmux.badgeStyle);
     const intervalMs = Math.max(Number(opts.interval) || 2, 2) * 1000;
     const maxLines = Number(opts.lines) || 12;
 
@@ -895,7 +904,10 @@ program
   .description("Refresh agent status in a long-lived loop")
   .option("--interval <sec>", "Refresh interval in seconds", "2")
   .option("--json", "Output as JSON")
+  .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
+    const config = await loadConfig(resolveConfigPath(opts));
+    applyTerminalStyle(config.integration.tmux.badgeStyle);
     const intervalSec = Number(opts.interval);
     const intervalMs = Number.isFinite(intervalSec) && intervalSec > 0 ? intervalSec * 1000 : 2_000;
 
