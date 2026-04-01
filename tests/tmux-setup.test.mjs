@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -8,6 +8,9 @@ import { describe, it } from "node:test";
 // Import will work after build.
 import {
   addMarmonitorPlugin,
+  detectTmuxIntegrationMode,
+  getMarmonitorPluginDir,
+  hasInstalledMarmonitorPlugin,
   hasMarmonitorPlugin,
   removeMarmonitorPlugin,
 } from "../dist/tmux/setup.js";
@@ -148,5 +151,66 @@ describe("removeMarmonitorPlugin", () => {
       assert.ok(!after.includes("marmonitor-tmux"));
       assert.ok(after.includes("set -g status on"));
     });
+  });
+});
+
+describe("tmux integration inspection", () => {
+  it("returns the default plugin directory under ~/.tmux/plugins", () => {
+    assert.equal(
+      getMarmonitorPluginDir("/Users/tester"),
+      "/Users/tester/.tmux/plugins/marmonitor-tmux",
+    );
+  });
+
+  it("detects a local run-shell integration", async () => {
+    await withTmpConf(
+      "run-shell ~/Documents/mjjo/marmonitor-tmux/marmonitor.tmux\n",
+      async (confPath) => {
+        const mode = await detectTmuxIntegrationMode(
+          confPath,
+          "/tmp/nonexistent-marmonitor-plugin",
+        );
+        assert.equal(mode, "local");
+      },
+    );
+  });
+
+  it("detects a configured-but-missing TPM plugin", async () => {
+    await withTmpConf("set -g @plugin 'mjjo16/marmonitor-tmux'\n", async (confPath) => {
+      const mode = await detectTmuxIntegrationMode(confPath, "/tmp/nonexistent-marmonitor-plugin");
+      assert.equal(mode, "missing");
+    });
+  });
+
+  it("detects a TPM checkout with git metadata", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "marmonitor-plugin-"));
+    const pluginDir = join(dir, "marmonitor-tmux");
+    await mkdir(pluginDir, { recursive: true });
+    await writeFile(join(dir, ".tmux.conf"), "set -g @plugin 'mjjo16/marmonitor-tmux'\n", "utf-8");
+    await writeFile(join(pluginDir, "marmonitor.tmux"), "#!/usr/bin/env bash\n", "utf-8");
+    try {
+      await writeFile(join(pluginDir, ".git"), "", "utf-8");
+      const confPath = join(dir, ".tmux.conf");
+      const mode = await detectTmuxIntegrationMode(confPath, pluginDir);
+      assert.equal(mode, "tpm");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("detects a non-git plugin directory", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "marmonitor-plugin-"));
+    const pluginDir = join(dir, "marmonitor-tmux");
+    const confPath = join(dir, ".tmux.conf");
+    await mkdir(pluginDir, { recursive: true });
+    await writeFile(confPath, "set -g @plugin 'mjjo16/marmonitor-tmux'\n", "utf-8");
+    await writeFile(join(pluginDir, "marmonitor.tmux"), "#!/usr/bin/env bash\n", "utf-8");
+    try {
+      const mode = await detectTmuxIntegrationMode(confPath, pluginDir);
+      assert.equal(mode, "not_git");
+      assert.equal(await hasInstalledMarmonitorPlugin(pluginDir), true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

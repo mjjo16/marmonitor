@@ -221,6 +221,8 @@ export function renderInstallInfo(): string {
     "Setup:",
     "  $ marmonitor setup tmux    - Add tmux plugin to ~/.tmux.conf",
     "  Then press prefix+I in tmux to activate.",
+    "  $ marmonitor update-integration",
+    "                           - Check whether the tmux plugin also needs sync",
     "",
     "Commands:",
     "  $ marmonitor status        - Show active AI sessions",

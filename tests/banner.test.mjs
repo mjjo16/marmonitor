@@ -21,6 +21,7 @@ describe("renderInstallInfo", () => {
     const text = renderInstallInfo();
     assert.match(text, /marmonitor v\d+\.\d+\.\d+/);
     assert.match(text, /marmonitor setup tmux/);
+    assert.match(text, /marmonitor update-integration/);
     assert.match(text, /marmonitor status/);
     assert.match(text, /uninstall-integration/);
     assert.match(text, /github\.com\/mjjo16\/marmonitor/);

@@ -87,6 +87,14 @@ marmonitor setup tmux
 
 This adds the [marmonitor-tmux](https://github.com/mjjo16/marmonitor-tmux) plugin to your `~/.tmux.conf`. Then press `prefix + I` inside tmux to activate.
 
+After upgrading `marmonitor`, run:
+
+```bash
+marmonitor update-integration
+```
+
+This checks whether your tmux integration also needs a TPM/plugin update.
+
 <details>
 <summary>Or add manually to ~/.tmux.conf</summary>
 

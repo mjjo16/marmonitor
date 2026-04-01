@@ -11,6 +11,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { execFileSync } = require("child_process");
 
 // Restart daemon if it was running (picks up new version)
 const pidPath = path.join(os.tmpdir(), "marmonitor", "daemon.pid");
@@ -26,21 +27,26 @@ try {
 }
 
 if (daemonWasRunning) {
-  // Brief delay then start new daemon
-  setTimeout(() => {
-    try {
-      const { fork } = require("child_process");
-      const daemonScript = path.join(__dirname, "..", "dist", "scanner", "daemon-entry.js");
-      // Only restart if the compiled entry exists (dist may not exist in dev)
-      if (fs.existsSync(daemonScript)) {
-        const child = fork(path.join(__dirname, "daemon.js"), [], { detached: true, stdio: "ignore" });
-        child.unref();
-        process.stderr.write(`  marmonitor: daemon restarted (PID: ${child.pid})\n`);
-      }
-    } catch {
-      process.stderr.write("  marmonitor: daemon restart failed — run: marmonitor start\n");
+  try {
+    const { fork } = require("child_process");
+    const daemonScript = path.join(__dirname, "..", "dist", "scanner", "daemon-entry.js");
+    // Only restart if the compiled entry exists (dist may not exist in dev)
+    if (fs.existsSync(daemonScript)) {
+      const child = fork(path.join(__dirname, "daemon.js"), [], { detached: true, stdio: "ignore" });
+      child.unref();
+      process.stderr.write(`  marmonitor: daemon restarted (PID: ${child.pid})\n`);
     }
-  }, 500);
+  } catch {
+    process.stderr.write("  marmonitor: daemon restart failed — run: marmonitor start\n");
+  }
+}
+
+try {
+  execFileSync(process.execPath, [path.join(__dirname, "marmonitor.js"), "update-integration", "--quiet"], {
+    stdio: "ignore",
+  });
+} catch {
+  // best-effort only — npm install should not fail if tmux/plugin state cannot be checked
 }
 
 const msg = `
@@ -51,6 +57,8 @@ const msg = `
     $ marmonitor start            Start background daemon
     $ marmonitor setup tmux       Add tmux plugin to ~/.tmux.conf
     Then press prefix+I in tmux to activate.
+    $ marmonitor update-integration
+                                Check whether the tmux plugin also needs sync
 
   Commands:
     $ marmonitor status           Show all AI sessions
@@ -64,3 +72,4 @@ const msg = `
 `;
 
 process.stderr.write(msg + "\n");
+process.exit(0);

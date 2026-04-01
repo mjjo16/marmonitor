@@ -49,6 +49,11 @@ describe("config CLI helpers", () => {
     assert.match(output, /debug-phase \[options\]/);
   });
 
+  it("includes update-integration in help output", () => {
+    const output = runCli(["--help"]);
+    assert.match(output, /update-integration/);
+  });
+
   it("includes phase icon legend in help output", () => {
     const output = runCli(["--help"]);
     assert.match(output, /permission/);
@@ -74,6 +79,7 @@ describe("postinstall/preuninstall scripts", () => {
     );
     assert.match(merged, /marmonitor.*installed/);
     assert.match(merged, /marmonitor setup tmux/);
+    assert.match(merged, /marmonitor update-integration/);
     assert.match(merged, /marmonitor status/);
     assert.match(merged, /uninstall-integration/);
   });

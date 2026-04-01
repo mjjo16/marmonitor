@@ -263,4 +263,35 @@ describe("indexCodexSessions", () => {
     assert.ok(matched.lastActivityAt);
     assert.ok(Math.abs(matched.lastActivityAt - Date.now() / 1000) < 10);
   });
+
+  it("prefers explicit codex session roots over the global sqlite index", async () => {
+    const now = new Date();
+    const yyyy = now.getFullYear().toString();
+    const mm = String(now.getMonth() + 1).padStart(2, "0");
+    const dd = String(now.getDate()).padStart(2, "0");
+    const root = join(tmpdir(), `marmonitor-codex-explicit-${Date.now()}`);
+    const dayDir = join(root, yyyy, mm, dd);
+    await mkdir(dayDir, { recursive: true });
+    const filePath = join(dayDir, "explicit.jsonl");
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: "codex-explicit",
+          cwd: "/tmp/explicit-project",
+          timestamp: new Date("2026-03-28T10:00:00.000Z").toISOString(),
+          model_provider: "gpt-5.4",
+        },
+      }),
+      "utf8",
+    );
+
+    setCodexIndexCache(undefined);
+    const config = getDefaults();
+    config.paths.codexSessions = [root];
+    const sessions = await indexCodexSessions(config);
+
+    assert.ok(sessions.some((item) => item.filePath === filePath));
+  });
 });
