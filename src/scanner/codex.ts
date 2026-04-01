@@ -160,8 +160,10 @@ export async function indexCodexSessions(config?: MarmonitorConfig): Promise<Cod
     return codexIndexCache.sessions;
   }
 
+  const hasExplicitSessionRoots = Boolean(config?.paths.codexSessions?.length);
+
   // Primary: SQLite threads table
-  const dbPath = findCodexStateDb();
+  const dbPath = hasExplicitSessionRoots ? undefined : findCodexStateDb();
   if (dbPath) {
     const sqliteSessions = await indexCodexSessionsFromSqlite(dbPath);
     if (sqliteSessions.length > 0) {
