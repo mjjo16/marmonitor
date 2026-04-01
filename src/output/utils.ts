@@ -423,12 +423,6 @@ function agentShortName(agentName: string): string {
   return agentName;
 }
 
-function attentionPriority(agent: AgentSession): number | undefined {
-  if (agent.phase === "permission") return 0;
-  if (agent.phase === "thinking") return 1;
-  return undefined;
-}
-
 function attentionKind(agent: AgentSession): AttentionKind | undefined {
   if (agent.phase === "permission") return "permission";
   if (agent.phase === "thinking") return "thinking";
@@ -445,21 +439,28 @@ function attentionActivityTime(
   return agent.lastActivityAt ?? agent.lastResponseAt ?? agent.startedAt ?? 0;
 }
 
+const STALE_ATTENTION_PHASE_SEC = 10 * 60;
+
+function attentionPriority(
+  agent: Pick<AgentSession, "phase" | "lastActivityAt" | "lastResponseAt" | "startedAt">,
+  nowSec = Date.now() / 1000,
+): number | undefined {
+  if (agent.phase === "permission") return 0;
+
+  const activityTime = attentionActivityTime(agent);
+  if (activityTime <= 0) return undefined;
+  const elapsedSec = Math.max(0, nowSec - activityTime);
+  const isFresh = elapsedSec <= STALE_ATTENTION_PHASE_SEC;
+
+  if (agent.phase === "thinking" && isFresh) return 1;
+  if (agent.phase === "tool" && isFresh) return 2;
+  return undefined;
+}
+
 function orderedAttentionItems(items: AttentionItem[]): AttentionItem[] {
-  const tier1Order: Partial<Record<AttentionKind, number>> = {
-    permission: 0,
-    thinking: 1,
-  };
-
   return [...items].sort((a, b) => {
-    const aTier1 = tier1Order[a.kind];
-    const bTier1 = tier1Order[b.kind];
-
-    if (aTier1 !== undefined || bTier1 !== undefined) {
-      if (aTier1 === undefined) return 1;
-      if (bTier1 === undefined) return -1;
-      if (aTier1 !== bTier1) return aTier1 - bTier1;
-      return attentionActivityTime(b) - attentionActivityTime(a);
+    if (a.priority !== b.priority) {
+      return a.priority - b.priority;
     }
 
     return attentionActivityTime(b) - attentionActivityTime(a);
@@ -467,8 +468,11 @@ function orderedAttentionItems(items: AttentionItem[]): AttentionItem[] {
 }
 
 /** Build prioritized attention list for popup/jump UX.
- * Order: permission -> thinking -> recently active alive sessions. */
-export function buildAttentionItems(agents: AgentSession[]): AttentionItem[] {
+ * Order: permission -> fresh thinking/tool -> recent alive sessions -> stale thinking/tool. */
+export function buildAttentionItems(
+  agents: AgentSession[],
+  nowSec = Date.now() / 1000,
+): AttentionItem[] {
   const alive = agents.filter(
     (agent) =>
       agent.status !== "Dead" && agent.status !== "Unmatched" && agent.status !== "Stalled",
@@ -495,22 +499,26 @@ export function buildAttentionItems(agents: AgentSession[]): AttentionItem[] {
   });
 
   const tier1 = alive
-    .filter((agent) => attentionPriority(agent) !== undefined)
+    .filter((agent) => attentionPriority(agent, nowSec) !== undefined)
     .sort((a, b) => {
-      const aPriority = attentionPriority(a) ?? Number.MAX_SAFE_INTEGER;
-      const bPriority = attentionPriority(b) ?? Number.MAX_SAFE_INTEGER;
+      const aPriority = attentionPriority(a, nowSec) ?? Number.MAX_SAFE_INTEGER;
+      const bPriority = attentionPriority(b, nowSec) ?? Number.MAX_SAFE_INTEGER;
       if (aPriority !== bPriority) return aPriority - bPriority;
       return attentionActivityTime(b) - attentionActivityTime(a);
     })
     .map((agent) =>
-      toAttentionItem(agent, attentionPriority(agent) ?? 0, attentionKind(agent) ?? "active"),
+      toAttentionItem(
+        agent,
+        attentionPriority(agent, nowSec) ?? 0,
+        attentionKind(agent) ?? "active",
+      ),
     );
 
   const tier1Pids = new Set(tier1.map((item) => item.pid));
   const tier2 = alive
     .filter((agent) => !tier1Pids.has(agent.pid))
     .sort((a, b) => attentionActivityTime(b) - attentionActivityTime(a))
-    .map((agent) => toAttentionItem(agent, 2, attentionKind(agent) ?? "active"));
+    .map((agent) => toAttentionItem(agent, 3, attentionKind(agent) ?? "active"));
 
   return [...tier1, ...tier2];
 }
@@ -525,8 +533,11 @@ export function selectAttentionItem(
 
 /** Build jumpable attention items for interactive navigation.
  *  Statusline/jump share the same top-of-mind ordering. */
-export function buildJumpAttentionItems(agents: AgentSession[]): AttentionItem[] {
-  return orderedAttentionItems(buildAttentionItems(agents));
+export function buildJumpAttentionItems(
+  agents: AgentSession[],
+  nowSec = Date.now() / 1000,
+): AttentionItem[] {
+  return orderedAttentionItems(buildAttentionItems(agents, nowSec));
 }
 
 export function selectJumpAttentionItem(
