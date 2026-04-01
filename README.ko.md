@@ -87,6 +87,20 @@ marmonitor setup tmux
 
 [marmonitor-tmux](https://github.com/mjjo16/marmonitor-tmux) 플러그인을 `~/.tmux.conf`에 추가합니다. tmux 안에서 `prefix + I`을 눌러 활성화하세요.
 
+`marmonitor`를 업그레이드한 뒤에는 다음 명령으로 tmux 연동 업데이트 경로를 확인하세요:
+
+```bash
+marmonitor update-integration
+```
+
+`prefix + U`로 TPM 플러그인을 업데이트했는데도 클릭 동작이나 팝업 키바인딩이 이전 버전처럼 남아 있다면, 실행 중인 tmux 서버에 플러그인을 다시 적용해야 합니다:
+
+```bash
+tmux run-shell ~/.tmux/plugins/marmonitor-tmux/marmonitor.tmux
+```
+
+이 증상은 주로 기존 tmux 세션에서 플러그인을 업그레이드할 때 발생합니다. 신규 설치에서 `prefix + I`로 처음 로드하는 경우에는 보통 바로 최신 바인딩이 적용됩니다.
+
 <details>
 <summary>직접 ~/.tmux.conf에 추가하기</summary>
 
