@@ -1,4 +1,5 @@
 import type { AgentSession, SessionPhase } from "../types.js";
+import { renderAttention, renderBadge, renderFocus, resolveTheme } from "./badge-themes.js";
 
 /**
  * Pure utility functions for marmonitor.
@@ -44,12 +45,16 @@ export function formatTokens(n: number): string {
 }
 
 /** Compact directory label for dock/focus display.
- *  Shows last 2 path segments to avoid basename collisions.
- *  e.g. "/Users/macrent/.ai/projects/mjjo" → "projects/mjjo"
- *       "/Users/macrent/Documents/valueofspace/vos-data-service" → "valueofspace/vos-data-service"
+ *  Replaces $HOME with ~ first, then shows last 2 path segments.
+ *  e.g. "/Users/macrent" → "~"
+ *       "/Users/macrent/marmonitor" → "~/marmonitor"
+ *       "/Users/macrent/Documents/vos/vos-data-service" → "vos/vos-data-service"
  *       "/Users/macrent/.ai/projects/vos" → "projects/vos" */
 export function compactDirLabel(cwd: string): string {
-  const parts = cwd.split("/").filter(Boolean);
+  const home = process.env.HOME ?? "";
+  const shortened = home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+  if (shortened === "~") return "~";
+  const parts = shortened.split("/").filter(Boolean);
   if (parts.length <= 1) return parts[0] || cwd;
   return parts.slice(-2).join("/");
 }
@@ -418,12 +423,6 @@ function agentShortName(agentName: string): string {
   return agentName;
 }
 
-function attentionPriority(agent: AgentSession): number | undefined {
-  if (agent.phase === "permission") return 0;
-  if (agent.phase === "thinking") return 1;
-  return undefined;
-}
-
 function attentionKind(agent: AgentSession): AttentionKind | undefined {
   if (agent.phase === "permission") return "permission";
   if (agent.phase === "thinking") return "thinking";
@@ -440,21 +439,28 @@ function attentionActivityTime(
   return agent.lastActivityAt ?? agent.lastResponseAt ?? agent.startedAt ?? 0;
 }
 
+const STALE_ATTENTION_PHASE_SEC = 10 * 60;
+
+function attentionPriority(
+  agent: Pick<AgentSession, "phase" | "lastActivityAt" | "lastResponseAt" | "startedAt">,
+  nowSec = Date.now() / 1000,
+): number | undefined {
+  if (agent.phase === "permission") return 0;
+
+  const activityTime = attentionActivityTime(agent);
+  if (activityTime <= 0) return undefined;
+  const elapsedSec = Math.max(0, nowSec - activityTime);
+  const isFresh = elapsedSec <= STALE_ATTENTION_PHASE_SEC;
+
+  if (agent.phase === "thinking" && isFresh) return 1;
+  if (agent.phase === "tool" && isFresh) return 2;
+  return undefined;
+}
+
 function orderedAttentionItems(items: AttentionItem[]): AttentionItem[] {
-  const tier1Order: Partial<Record<AttentionKind, number>> = {
-    permission: 0,
-    thinking: 1,
-  };
-
   return [...items].sort((a, b) => {
-    const aTier1 = tier1Order[a.kind];
-    const bTier1 = tier1Order[b.kind];
-
-    if (aTier1 !== undefined || bTier1 !== undefined) {
-      if (aTier1 === undefined) return 1;
-      if (bTier1 === undefined) return -1;
-      if (aTier1 !== bTier1) return aTier1 - bTier1;
-      return attentionActivityTime(b) - attentionActivityTime(a);
+    if (a.priority !== b.priority) {
+      return a.priority - b.priority;
     }
 
     return attentionActivityTime(b) - attentionActivityTime(a);
@@ -462,8 +468,11 @@ function orderedAttentionItems(items: AttentionItem[]): AttentionItem[] {
 }
 
 /** Build prioritized attention list for popup/jump UX.
- * Order: permission -> thinking -> recently active alive sessions. */
-export function buildAttentionItems(agents: AgentSession[]): AttentionItem[] {
+ * Order: permission -> fresh thinking/tool -> recent alive sessions -> stale thinking/tool. */
+export function buildAttentionItems(
+  agents: AgentSession[],
+  nowSec = Date.now() / 1000,
+): AttentionItem[] {
   const alive = agents.filter(
     (agent) =>
       agent.status !== "Dead" && agent.status !== "Unmatched" && agent.status !== "Stalled",
@@ -490,22 +499,26 @@ export function buildAttentionItems(agents: AgentSession[]): AttentionItem[] {
   });
 
   const tier1 = alive
-    .filter((agent) => attentionPriority(agent) !== undefined)
+    .filter((agent) => attentionPriority(agent, nowSec) !== undefined)
     .sort((a, b) => {
-      const aPriority = attentionPriority(a) ?? Number.MAX_SAFE_INTEGER;
-      const bPriority = attentionPriority(b) ?? Number.MAX_SAFE_INTEGER;
+      const aPriority = attentionPriority(a, nowSec) ?? Number.MAX_SAFE_INTEGER;
+      const bPriority = attentionPriority(b, nowSec) ?? Number.MAX_SAFE_INTEGER;
       if (aPriority !== bPriority) return aPriority - bPriority;
       return attentionActivityTime(b) - attentionActivityTime(a);
     })
     .map((agent) =>
-      toAttentionItem(agent, attentionPriority(agent) ?? 0, attentionKind(agent) ?? "active"),
+      toAttentionItem(
+        agent,
+        attentionPriority(agent, nowSec) ?? 0,
+        attentionKind(agent) ?? "active",
+      ),
     );
 
   const tier1Pids = new Set(tier1.map((item) => item.pid));
   const tier2 = alive
     .filter((agent) => !tier1Pids.has(agent.pid))
     .sort((a, b) => attentionActivityTime(b) - attentionActivityTime(a))
-    .map((agent) => toAttentionItem(agent, 2, attentionKind(agent) ?? "active"));
+    .map((agent) => toAttentionItem(agent, 3, attentionKind(agent) ?? "active"));
 
   return [...tier1, ...tier2];
 }
@@ -520,8 +533,11 @@ export function selectAttentionItem(
 
 /** Build jumpable attention items for interactive navigation.
  *  Statusline/jump share the same top-of-mind ordering. */
-export function buildJumpAttentionItems(agents: AgentSession[]): AttentionItem[] {
-  return orderedAttentionItems(buildAttentionItems(agents));
+export function buildJumpAttentionItems(
+  agents: AgentSession[],
+  nowSec = Date.now() / 1000,
+): AttentionItem[] {
+  return orderedAttentionItems(buildAttentionItems(agents, nowSec));
 }
 
 export function selectJumpAttentionItem(
@@ -530,6 +546,55 @@ export function selectJumpAttentionItem(
 ): AttentionItem | undefined {
   if (!Number.isInteger(selection) || selection < 1) return undefined;
   return buildJumpAttentionItems(agents)[selection - 1];
+}
+
+export function selectJumpAttentionItemOnPage(
+  agents: AgentSession[],
+  page: number,
+  selection: number,
+  pageSize = 10,
+): AttentionItem | undefined {
+  if (!Number.isInteger(selection) || selection < 1) return undefined;
+  if (!Number.isInteger(page) || page < 1) return undefined;
+  if (!Number.isInteger(pageSize) || pageSize < 1) return undefined;
+  const start = (page - 1) * pageSize;
+  return buildJumpAttentionItems(agents)[start + selection - 1];
+}
+
+export type SelectionAction =
+  | { kind: "cancel" }
+  | { kind: "next" }
+  | { kind: "prev" }
+  | { kind: "select"; selection: number };
+
+export function parseSelectionInput(
+  input: string,
+  maxChoice: number,
+  currentPage = 1,
+  totalPages = 1,
+): SelectionAction | undefined {
+  if (input === "\u001b" || input === "q" || input === "Q") {
+    return { kind: "cancel" };
+  }
+  if (input === "\u001b[C" && currentPage < totalPages) {
+    return { kind: "next" };
+  }
+  if (input === "\u001b[D" && currentPage > 1) {
+    return { kind: "prev" };
+  }
+
+  const trimmed = input.trim();
+  if (/^[1-9]$/.test(trimmed)) {
+    const selection = Number.parseInt(trimmed, 10);
+    if (selection <= maxChoice) {
+      return { kind: "select", selection };
+    }
+    return undefined;
+  }
+  if (trimmed === "0" && maxChoice >= 10) {
+    return { kind: "select", selection: 10 };
+  }
+  return undefined;
 }
 
 export function buildAttentionFocusText(
@@ -693,13 +758,7 @@ export function buildStatuslineSummary(
   return standardParts.join(" | ");
 }
 
-function tmuxPill(label: string, fg: string, bg: string): string {
-  return `#[fg=${bg},bg=#1e1e2e]#[bold,fg=${fg},bg=${bg}] ${label} #[fg=${bg},bg=#1e1e2e]#[default]`;
-}
-
-function tmuxDetailBlock(label: string): string {
-  return `#[fg=#cdd6f4,bg=#313244] ${label} #[fg=#313244,bg=#1e1e2e]#[default]`;
-}
+export type BadgeStyle = "basic" | "basic-mono" | "text" | "text-mono";
 
 function attentionBg(kind: Exclude<AttentionKind, "unmatched">): string {
   if (kind === "permission") return "#f38ba8";
@@ -718,18 +777,30 @@ function tmuxAttentionSegment(
   return `#[fg=${bg},bg=#1e1e2e]#[bold,fg=#11111b,bg=${bg}] ${index} #[fg=#313244,bg=${bg}]#[fg=#cdd6f4,bg=#313244] ${label} #[fg=#313244,bg=#1e1e2e]#[default]`;
 }
 
-export function buildTmuxBadgeBar(snapshot: StatuslineSnapshot, focusText?: string): string {
+function tmuxUserRange(value: string, content: string): string {
+  return `#[range=user|${value}]${content}#[norange]`;
+}
+
+export function buildTmuxBadgeBar(
+  snapshot: StatuslineSnapshot,
+  focusText?: string,
+  badgeStyle: BadgeStyle = "basic",
+  hasJumpAnchor = false,
+): string {
+  const theme = resolveTheme(badgeStyle);
   const { agents, alerts } = buildStatusPills(snapshot);
-  const agentPills = agents.map((pill) => tmuxPill(pill.label, pill.fg, pill.bg));
-  const alertPills = alerts.map((pill) => tmuxPill(pill.label, pill.fg, pill.bg));
-  const focus = focusText ? `#[fg=#bac2de,bg=#181825] ${focusText} #[default]` : "";
-  return [agentPills.join(" "), alertPills.join(" "), focus].filter(Boolean).join("  ");
+  const agentPills = agents.map((pill) => renderBadge(theme, pill.label, pill.fg, pill.bg));
+  const alertPills = alerts.map((pill) => renderBadge(theme, pill.label, pill.fg, pill.bg));
+  const jumpBack = hasJumpAnchor ? tmuxUserRange("jump-back", theme.jumpBack) : "";
+  const focus = focusText ? renderFocus(theme, focusText) : "";
+  return [agentPills.join(" "), alertPills.join(" "), jumpBack, focus].filter(Boolean).join("  ");
 }
 
 export function buildTmuxAttentionPills(
   items: AttentionItem[],
   maxCount = 5,
   width?: number,
+  badgeStyle: BadgeStyle = "basic",
 ): string | undefined {
   if (maxCount <= 0) return undefined;
   const layout = resolveStatuslineDetailLayout(width, maxCount);
@@ -740,8 +811,10 @@ export function buildTmuxAttentionPills(
     )
     .slice(0, layout.itemCount);
 
+  const theme = resolveTheme(badgeStyle);
+
   if (jumpItems.length === 0) {
-    return tmuxDetailBlock("no active");
+    return theme.empty;
   }
 
   const segments = jumpItems.map((item, index) => {
@@ -766,7 +839,10 @@ export function buildTmuxAttentionPills(
               : time
                 ? `⚠${agent} ${path} ${time}`
                 : `⚠${agent} ${path}`;
-    return tmuxAttentionSegment(index + 1, item.kind, label);
+    return tmuxUserRange(
+      `pid:${item.pid}`,
+      renderAttention(theme, index + 1, label, attentionBg(item.kind)),
+    );
   });
 
   return segments.join("  ");

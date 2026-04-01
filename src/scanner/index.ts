@@ -7,7 +7,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import pidusage from "pidusage";
 import psList from "ps-list";
@@ -23,7 +23,7 @@ export { parseGeminiSessionContent } from "./gemini.js";
 
 // ─── Internal imports ─────────────────────────────────────────────
 
-import { sessionEnrichmentCache } from "./cache.js";
+import { claudeSessionRegistry, sessionEnrichmentCache } from "./cache.js";
 import {
   detectClaudePhase,
   getClaudeSessionRoots,
@@ -31,14 +31,17 @@ import {
   parseClaudeTokens,
 } from "./claude.js";
 import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./codex.js";
+import { promiseAllLimited } from "./concurrency.js";
 import { parseGeminiSession } from "./gemini.js";
 import { groupByParent } from "./group.js";
+import { perfEnd, perfStart } from "./perf.js";
 import {
   detectAgentFromProcessSignature as _detectAgent,
   detectRuntimeSource,
   getProcessCwd,
   getProcessStartTime,
 } from "./process.js";
+import { classifySessionTier } from "./session-tier.js";
 import { detectCliStdoutPhase, determineStatus } from "./status.js";
 
 import type { ScanOptions } from "./types.js";
@@ -54,8 +57,12 @@ export async function scanAgents(
   const isFullEnrichment = enrichmentMode === "full";
   const seenPids = new Set<number>();
 
+  perfStart("scanAgents");
+
   // 1. Find running processes
+  perfStart("ps-list");
   const processes = await psList();
+  perfEnd("ps-list");
 
   // Filter to agent processes
   const agentProcesses: Array<{ proc: (typeof processes)[0]; agentName: string }> = [];
@@ -68,6 +75,7 @@ export async function scanAgents(
   }
 
   // 2. Batch pidusage
+  perfStart("pidusage");
   const pids = agentProcesses.map((a) => a.proc.pid);
   let usageMap: Record<number, { cpu: number; memory: number }> = {};
   try {
@@ -75,12 +83,15 @@ export async function scanAgents(
   } catch {
     // some PIDs may have exited
   }
+  perfEnd("pidusage");
 
   // 3. Pre-index Codex sessions (once, shared across all Codex processes)
+  perfStart("codex-index");
   const codexSessions = isFullEnrichment ? await indexCodexSessions(config) : [];
+  perfEnd("codex-index");
 
-  // 4. Build sessions with enrichment (parallel)
-  const sessionPromises = agentProcesses.map(async ({ proc, agentName }) => {
+  // 4. Build sessions with enrichment (concurrency limited)
+  const sessionPromises = agentProcesses.map(({ proc, agentName }) => async () => {
     const usage = usageMap[proc.pid];
     const cpuPercent = usage ? Math.round(usage.cpu * 10) / 10 : 0;
     const memoryMb = usage ? Math.round((usage.memory / (1024 * 1024)) * 10) / 10 : 0;
@@ -102,7 +113,37 @@ export async function scanAgents(
     const cacheKey = `${agentName}:${proc.pid}`;
     const cachedEnrichment = sessionEnrichmentCache.get(cacheKey);
 
-    if (!isFullEnrichment && cachedEnrichment) {
+    // Determine session tier for differential enrichment
+    const tier = cachedEnrichment
+      ? classifySessionTier(
+          cachedEnrichment.lastActivityAt,
+          Date.now() / 1000,
+          cpuPercent,
+          cachedEnrichment.phase,
+        )
+      : "hot"; // no cache = first time seeing this session, treat as hot
+
+    // Cold session JSONL mtime check: detect activity without full enrichment
+    let coldPromoted = false;
+    if (tier === "cold" && cachedEnrichment?.sessionId && agentName === "Claude Code") {
+      const regEntry = claudeSessionRegistry.get(cachedEnrichment.sessionId);
+      if (regEntry?.filePath) {
+        try {
+          const fileStat = await stat(regEntry.filePath);
+          const cachedActivity = (cachedEnrichment.lastActivityAt ?? 0) * 1000;
+          if (fileStat.mtimeMs > cachedActivity + 1000) {
+            coldPromoted = true; // JSONL changed → force enrichment
+          }
+        } catch {
+          // file gone or inaccessible — keep cold
+        }
+      }
+    }
+
+    const useCachedEnrichment =
+      cachedEnrichment && !coldPromoted && (!isFullEnrichment || tier === "cold");
+
+    if (useCachedEnrichment) {
       if (cachedEnrichment.cwd) cwd = cachedEnrichment.cwd;
       sessionId = cachedEnrichment.sessionId;
       startedAt = cachedEnrichment.startedAt;
@@ -112,12 +153,18 @@ export async function scanAgents(
       phase = cachedEnrichment.phase;
       lastResponseAt = cachedEnrichment.lastResponseAt;
       lastActivityAt = cachedEnrichment.lastActivityAt;
+    } else if (!isFullEnrichment && !cachedEnrichment) {
+      // Light mode with no cache: skip expensive enrichment (lsof, JSONL, tmux)
+      sessionMatched = true;
     } else if (agentName === "Claude Code") {
-      const claudeData = await parseClaudeSession(proc.pid, config);
+      // Get cwd and start time early so mtime-based matching can use them
+      const processCwd = (await getProcessCwd(proc.pid)) ?? undefined;
+      const processStartTime = await getProcessStartTime(proc.pid);
+      const claudeData = await parseClaudeSession(proc.pid, processCwd, processStartTime, config);
       if (claudeData.cwd) cwd = claudeData.cwd;
-      if (cwd === "unknown") cwd = (await getProcessCwd(proc.pid)) ?? "unknown";
+      if (cwd === "unknown") cwd = processCwd ?? "unknown";
       sessionId = claudeData.sessionId;
-      startedAt = claudeData.startedAt;
+      startedAt = claudeData.startedAt ?? processStartTime;
       tokenUsage = claudeData.tokenUsage;
       model = claudeData.model;
       sessionMatched = claudeData.sessionMatched ?? false;
@@ -173,7 +220,7 @@ export async function scanAgents(
       }
     }
 
-    if (cwd === "unknown") {
+    if (cwd === "unknown" && isFullEnrichment) {
       cwd = cachedEnrichment?.cwd ?? (await getProcessCwd(proc.pid)) ?? "unknown";
     }
 
@@ -218,7 +265,8 @@ export async function scanAgents(
     return session;
   });
 
-  const results = await Promise.all(sessionPromises);
+  const concurrencyLimit = isFullEnrichment ? 8 : 4;
+  const results = await promiseAllLimited(sessionPromises, concurrencyLimit);
   const sessions: AgentSession[] = results.filter((s): s is AgentSession => s !== null);
 
   // 5. Check for dead sessions (Claude: session file exists but process gone)
@@ -292,5 +340,6 @@ export async function scanAgents(
     }
   });
 
+  perfEnd("scanAgents");
   return grouped;
 }

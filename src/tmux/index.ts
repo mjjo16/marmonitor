@@ -1,6 +1,9 @@
 import { execFile } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AgentSession } from "../types.js";
+import { getClientTty, getCurrentTmuxLocation, saveJumpAnchorIfMissing } from "./jump-anchor.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -183,9 +186,19 @@ export async function jumpToTmuxPane(target: TmuxJumpTarget): Promise<boolean> {
   }
 }
 
+const ANCHOR_PATH = join(tmpdir(), "marmonitor", "jump-anchors.json");
+
 export async function jumpToAgent(
   agent: Pick<AgentSession, "pid" | "cwd">,
 ): Promise<TmuxJumpResult> {
+  // Save current location as jump-back anchor before jumping
+  if (process.env.TMUX) {
+    const [tty, location] = await Promise.all([getClientTty(), getCurrentTmuxLocation()]);
+    if (tty && location) {
+      await saveJumpAnchorIfMissing(ANCHOR_PATH, tty, location).catch(() => {});
+    }
+  }
+
   const target = await resolveTmuxJumpTarget(agent);
   if (!target) {
     return {

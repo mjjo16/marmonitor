@@ -13,6 +13,7 @@ import {
 } from "./config/index.js";
 import { evaluateGuard, formatGuardOutput, parseHookEvent, readStdin } from "./guard/index.js";
 import {
+  applyTerminalStyle,
   printAttention,
   printAttentionJson,
   printCleanJson,
@@ -24,17 +25,27 @@ import {
   printStatus,
   printStatusJson,
   printStatusline,
+  renderJumpAttentionChooser,
   renderStatusline,
   renderUnavailableStatusline,
 } from "./output/index.js";
-import { selectJumpAttentionItem, selectUnmatchedTargets } from "./output/utils.js";
+import {
+  buildJumpAttentionItems,
+  parseSelectionInput,
+  selectJumpAttentionItem,
+  selectJumpAttentionItemOnPage,
+  selectUnmatchedTargets,
+} from "./output/utils.js";
 import { TERMINAL_RESTORE_SEQUENCE, formatProcessFailure } from "./process-safety.js";
 import { detectClaudePhase } from "./scanner/claude.js";
 import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./scanner/codex.js";
+import { isDaemonRunning, readDaemonPid, readDaemonSnapshot } from "./scanner/daemon-utils.js";
 import { parseGeminiSession } from "./scanner/gemini.js";
 import { scanAgents } from "./scanner/index.js";
 import { detectCliStdoutPhase } from "./scanner/status.js";
 import { captureTmuxPaneOutput, jumpToAgent, resolveTmuxJumpTarget } from "./tmux/index.js";
+import { getClientTty, jumpBack } from "./tmux/jump-anchor.js";
+import { findClickedAgent, parseStatusClickToken } from "./tmux/status-click.js";
 import type { AgentSession } from "./types.js";
 import { VERSION } from "./version.js";
 
@@ -143,6 +154,12 @@ function buildHelpAppendix(): string {
     "  [Dead]      Session file exists but process gone",
     "  [Unmatched] AI process without matching session",
     "",
+    "Common settings:",
+    "  display.attentionLimit / display.statuslineAttentionLimit",
+    "  integration.tmux.badgeStyle",
+    "  integration.tmux.keys.*",
+    "  paths.* (runtime data path overrides)",
+    "",
     "Default tmux shortcuts:",
     "  Prefix+a      Attention popup",
     "  Prefix+j      Jump popup",
@@ -166,16 +183,24 @@ function clearScreen(): void {
   }
 }
 
-async function promptSelectionKey(maxChoice: number): Promise<number | undefined> {
+async function promptSelectionAction(
+  maxChoice: number,
+  currentPage = 1,
+  totalPages = 1,
+): Promise<ReturnType<typeof parseSelectionInput>> {
   if (!process.stdin.isTTY || maxChoice < 1) return undefined;
 
   const prompt =
-    maxChoice >= 10
-      ? "\nPress 1-9 to jump, 0 for item 10, q to cancel: "
-      : `\nPress 1-${maxChoice} to jump, q to cancel: `;
+    totalPages > 1
+      ? maxChoice >= 10
+        ? "\n←/→ page, 1-9 to jump, 0 for 10, q to cancel: "
+        : `\n←/→ page, 1-${maxChoice} to jump, q to cancel: `
+      : maxChoice >= 10
+        ? "\n1-9 to jump, 0 for 10, q to cancel: "
+        : `\n1-${maxChoice} to jump, q to cancel: `;
   process.stdout.write(prompt);
 
-  return await new Promise<number | undefined>((resolve) => {
+  return await new Promise<ReturnType<typeof parseSelectionInput>>((resolve) => {
     const stdin = process.stdin;
     const restoreRawMode = "setRawMode" in stdin && typeof stdin.setRawMode === "function";
 
@@ -192,24 +217,10 @@ async function promptSelectionKey(maxChoice: number): Promise<number | undefined
         cleanup();
         exitWithCleanup(130);
       }
-      if (input === "\u001b" || input === "q" || input === "Q") {
+      const action = parseSelectionInput(input, maxChoice, currentPage, totalPages);
+      if (action) {
         cleanup();
-        resolve(undefined);
-        return;
-      }
-
-      const trimmed = input.trim();
-      if (/^[1-9]$/.test(trimmed)) {
-        const selection = Number.parseInt(trimmed, 10);
-        if (selection <= maxChoice) {
-          cleanup();
-          resolve(selection);
-        }
-        return;
-      }
-      if (trimmed === "0" && maxChoice >= 10) {
-        cleanup();
-        resolve(10);
+        resolve(action);
       }
     };
 
@@ -291,6 +302,7 @@ function buildMinimalConfigSample(): string {
       },
       integration: {
         tmux: {
+          badgeStyle: "basic",
           keys: {
             attentionPopup: "a",
             jumpPopup: "j",
@@ -327,6 +339,7 @@ function buildAdvancedConfigSample(): string {
       },
       integration: {
         tmux: {
+          badgeStyle: "basic",
           keys: {
             attentionPopup: "a",
             jumpPopup: "j",
@@ -461,14 +474,6 @@ function statuslineCacheFile(format: string, attentionLimit: number, width?: num
   return join(tmpdir(), "marmonitor", `statusline-${format}-${attentionLimit}-${widthKey}.txt`);
 }
 
-function snapshotCacheFile(enrichmentMode: "full" | "light", showDead: boolean): string {
-  return join(
-    tmpdir(),
-    "marmonitor",
-    `snapshot-${enrichmentMode}-${showDead ? "dead" : "alive"}.json`,
-  );
-}
-
 async function readCachedStatusline(
   format: string,
   attentionLimit: number,
@@ -500,51 +505,20 @@ async function writeCachedStatusline(
   }
 }
 
-async function readCachedSnapshot(
-  enrichmentMode: "full" | "light",
-  showDead: boolean,
-  ttlMs: number,
-): Promise<AgentSession[] | undefined> {
-  const path = snapshotCacheFile(enrichmentMode, showDead);
-  try {
-    const fileStat = await stat(path);
-    if (Date.now() - fileStat.mtimeMs > ttlMs) return undefined;
-    return JSON.parse(await readFile(path, "utf-8")) as AgentSession[];
-  } catch {
-    return undefined;
-  }
+const DAEMON_DIR = join(tmpdir(), "marmonitor");
+const DAEMON_PID_PATH = join(DAEMON_DIR, "daemon.pid");
+const DAEMON_SNAPSHOT_PATH = join(DAEMON_DIR, "daemon-snapshot.json");
+const DAEMON_NOT_RUNNING = "Daemon not running. Run: marmonitor start";
+
+async function getAgentsSnapshot(): Promise<AgentSession[]> {
+  return (await readDaemonSnapshot(DAEMON_SNAPSHOT_PATH, 5_000)) as AgentSession[];
 }
 
-async function writeCachedSnapshot(
-  enrichmentMode: "full" | "light",
-  showDead: boolean,
-  agents: AgentSession[],
-): Promise<void> {
-  const path = snapshotCacheFile(enrichmentMode, showDead);
-  try {
-    await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
-    await writeFile(path, JSON.stringify(agents), "utf-8");
-  } catch {
-    // snapshot cache failures must never break command execution
-  }
-}
-
-async function getAgentsSnapshot(
-  config: Awaited<ReturnType<typeof loadConfig>>,
-  options: { enrichmentMode?: "full" | "light"; ttlMs?: number } = {},
-): Promise<AgentSession[]> {
-  const enrichmentMode = options.enrichmentMode ?? "full";
-  const ttlMs = options.ttlMs ?? config.performance.snapshotTtlMs;
-  const useCache = ttlMs > 0;
-
-  if (useCache) {
-    const cached = await readCachedSnapshot(enrichmentMode, config.display.showDead, ttlMs);
-    if (cached) return cached;
-  }
-
-  const agents = await scanAgents(config, { enrichmentMode });
-  if (useCache) {
-    await writeCachedSnapshot(enrichmentMode, config.display.showDead, agents);
+async function requireDaemonSnapshot(): Promise<AgentSession[]> {
+  const agents = await getAgentsSnapshot();
+  if (agents.length === 0) {
+    console.error(DAEMON_NOT_RUNNING);
+    process.exit(1);
   }
   return agents;
 }
@@ -583,12 +557,31 @@ program
           console.log(cached);
           return;
         }
-        const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
+        const agents = await getAgentsSnapshot();
+        if (agents.length === 0) {
+          console.log(renderUnavailableStatusline(opts.statuslineFormat));
+          return;
+        }
+        // Check jump-back anchor for indicator
+        let hasJumpAnchor = false;
+        if (opts.statuslineFormat === "tmux-badges") {
+          const { tmpdir: td } = await import("node:os");
+          const { join: pj } = await import("node:path");
+          const { loadJumpAnchor } = await import("./tmux/jump-anchor.js");
+          const tty = await getClientTty();
+          if (tty) {
+            hasJumpAnchor = Boolean(
+              await loadJumpAnchor(pj(td(), "marmonitor", "jump-anchors.json"), tty),
+            );
+          }
+        }
         const rendered = await renderStatusline(
           agents,
           opts.statuslineFormat,
           attentionLimit,
           width,
+          config.integration.tmux.badgeStyle,
+          hasJumpAnchor,
         );
         await writeCachedStatusline(opts.statuslineFormat, attentionLimit, width, rendered);
         console.log(rendered);
@@ -606,11 +599,10 @@ program
   .description("Show current AI agent status")
   .option("--json", "Output as JSON")
   .option("--config <path>", "Path to settings.json")
-  .option("--show-dead", "Include dead sessions")
   .action(async (opts) => {
+    const agents = await requireDaemonSnapshot();
     const config = await loadConfig(resolveConfigPath(opts));
-    if (opts.showDead) config.display.showDead = true;
-    const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
+    applyTerminalStyle(config.integration.tmux.badgeStyle);
     if (opts.json) {
       await printStatusJson(agents);
     } else {
@@ -640,8 +632,9 @@ program
   .option("--limit <n>", "Max items to show", "12")
   .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
+    const agents = await requireDaemonSnapshot();
     const config = await loadConfig(resolveConfigPath(opts));
-    const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
+    applyTerminalStyle(config.integration.tmux.badgeStyle);
     const limit = resolveAttentionLimit(opts, config.display.attentionLimit);
     const interactiveLimit = resolveAttentionLimit(opts, config.display.attentionLimit, true);
     if (opts.interactive && opts.json) {
@@ -653,12 +646,37 @@ program
         console.error("--interactive requires an interactive terminal.");
         process.exit(1);
       }
-      printJumpAttentionChooser(agents, interactiveLimit);
-      const selection = await promptSelectionKey(interactiveLimit);
-      if (selection === undefined) return;
-      const item = selectJumpAttentionItem(agents, selection);
+      const totalItems = buildJumpAttentionItems(agents).length;
+      const totalPages = Math.max(1, Math.ceil(totalItems / interactiveLimit));
+      let currentPage = 1;
+      let item: ReturnType<typeof selectJumpAttentionItemOnPage>;
+      while (true) {
+        clearScreen();
+        console.log(renderJumpAttentionChooser(agents, currentPage, interactiveLimit));
+        const pageItemCount = Math.min(
+          interactiveLimit,
+          Math.max(totalItems - (currentPage - 1) * interactiveLimit, 0),
+        );
+        const action = await promptSelectionAction(pageItemCount, currentPage, totalPages);
+        if (!action || action.kind === "cancel") return;
+        if (action.kind === "next") {
+          currentPage = Math.min(currentPage + 1, totalPages);
+          continue;
+        }
+        if (action.kind === "prev") {
+          currentPage = Math.max(currentPage - 1, 1);
+          continue;
+        }
+        item = selectJumpAttentionItemOnPage(
+          agents,
+          currentPage,
+          action.selection,
+          interactiveLimit,
+        );
+        break;
+      }
       if (!item) {
-        console.error(`Invalid selection: ${selection}`);
+        console.error("Invalid selection.");
         process.exit(1);
       }
       const agent = agents.find((candidate) => candidate.pid === item.pid);
@@ -831,8 +849,8 @@ program
   .option("--json", "Output as JSON")
   .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
+    const agents = await requireDaemonSnapshot();
     const config = await loadConfig(resolveConfigPath(opts));
-    const agents = await getAgentsSnapshot(config, { enrichmentMode: "full" });
     const useAttention = Boolean(opts.attention);
     const useAttentionIndex = typeof opts.attentionIndex === "string";
     const usePid = typeof opts.pid === "string";
@@ -854,12 +872,29 @@ program
         config.display.attentionLimit,
         true,
       );
-      printJumpAttentionChooser(agents, limit);
-      const selection = await promptSelectionKey(limit);
-      if (selection === undefined) return;
-      const item = selectJumpAttentionItem(agents, selection);
+      const totalItems = buildJumpAttentionItems(agents).length;
+      const totalPages = Math.max(1, Math.ceil(totalItems / limit));
+      let currentPage = 1;
+      let item: ReturnType<typeof selectJumpAttentionItemOnPage>;
+      while (true) {
+        clearScreen();
+        console.log(renderJumpAttentionChooser(agents, currentPage, limit));
+        const pageItemCount = Math.min(limit, Math.max(totalItems - (currentPage - 1) * limit, 0));
+        const action = await promptSelectionAction(pageItemCount, currentPage, totalPages);
+        if (!action || action.kind === "cancel") return;
+        if (action.kind === "next") {
+          currentPage = Math.min(currentPage + 1, totalPages);
+          continue;
+        }
+        if (action.kind === "prev") {
+          currentPage = Math.max(currentPage - 1, 1);
+          continue;
+        }
+        item = selectJumpAttentionItemOnPage(agents, currentPage, action.selection, limit);
+        break;
+      }
       if (!item) {
-        console.error(`Invalid selection: ${selection}`);
+        console.error("Invalid selection.");
         process.exit(1);
       }
       pid = item.pid;
@@ -910,29 +945,70 @@ program
   });
 
 program
+  .command("jump-back")
+  .description("Return to the tmux pane you were in before the last jump")
+  .option("--client-tty <tty>", "Override client tty (auto-detected if omitted)")
+  .action(async (opts) => {
+    const { tmpdir: td } = await import("node:os");
+    const { join: pjoin } = await import("node:path");
+    const anchorPath = pjoin(td(), "marmonitor", "jump-anchors.json");
+    const tty = opts.clientTty ?? (await getClientTty());
+    if (!tty) {
+      console.error("Cannot detect tmux client. Are you inside tmux?");
+      process.exit(1);
+    }
+    const result = await jumpBack(anchorPath, tty);
+    console.log(result.message);
+    if (!result.success) process.exit(1);
+  });
+
+program
+  .command("status-click")
+  .description("Internal tmux statusline click handler")
+  .argument("[token]", "tmux mouse status range token")
+  .option("--client-tty <tty>", "Override client tty (auto-detected if omitted)")
+  .action(async (token: string | undefined, opts) => {
+    const action = parseStatusClickToken(token);
+    if (!action) return;
+
+    if (action.kind === "jump-back") {
+      const { tmpdir: td } = await import("node:os");
+      const { join: pjoin } = await import("node:path");
+      const anchorPath = pjoin(td(), "marmonitor", "jump-anchors.json");
+      const tty = opts.clientTty ?? (await getClientTty());
+      if (!tty) process.exit(1);
+      const result = await jumpBack(anchorPath, tty);
+      if (!result.success) process.exit(1);
+      return;
+    }
+
+    const agents = await getAgentsSnapshot();
+    if (agents.length === 0) process.exit(1);
+    const agent = findClickedAgent(agents, action);
+    if (!agent) process.exit(1);
+    const result = await jumpToAgent(agent);
+    if (!result.executed) process.exit(1);
+  });
+
+program
   .command("dock")
   .description("Compact persistent monitor for tmux pane")
   .option("--interval <sec>", "Refresh interval in seconds", "2")
-  .option("--detail-interval <sec>", "Heavy enrichment interval", "30")
   .option("--lines <n>", "Max display lines", "12")
   .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
-    const intervalMs = Math.max(Number(opts.interval) || 2, 2) * 1000;
-    const detailMs = Math.max(Number(opts.detailInterval) || 30, 5) * 1000;
-    const maxLines = Number(opts.lines) || 12;
     const config = await loadConfig(resolveConfigPath(opts));
-    let lastHeavyAt = 0;
+    applyTerminalStyle(config.integration.tmux.badgeStyle);
+    const intervalMs = Math.max(Number(opts.interval) || 2, 2) * 1000;
+    const maxLines = Number(opts.lines) || 12;
 
+    let agents = await requireDaemonSnapshot();
     while (true) {
-      const now = Date.now();
-      const needsHeavy = lastHeavyAt === 0 || now - lastHeavyAt >= detailMs;
-      const agents = await scanAgents(config, {
-        enrichmentMode: needsHeavy ? "full" : "light",
-      });
-      if (needsHeavy) lastHeavyAt = now;
       clearScreen();
       await printDock(agents, maxLines);
       await sleep(intervalMs);
+      agents = await getAgentsSnapshot();
+      if (agents.length === 0) agents = []; // daemon stopped mid-loop
     }
   });
 
@@ -940,31 +1016,16 @@ program
   .command("watch")
   .description("Refresh agent status in a long-lived loop")
   .option("--interval <sec>", "Refresh interval in seconds", "2")
-  .option("--detail-interval <sec>", "Heavy enrichment refresh interval in seconds", "30")
   .option("--json", "Output as JSON")
   .option("--config <path>", "Path to settings.json")
-  .option("--show-dead", "Include dead sessions")
   .action(async (opts) => {
-    const intervalSec = Number(opts.interval);
-    const detailIntervalSec = Number(opts.detailInterval);
-    const intervalMs =
-      Number.isFinite(intervalSec) && intervalSec > 0 ? intervalSec * 1000 : 10_000;
-    const detailIntervalMs =
-      Number.isFinite(detailIntervalSec) && detailIntervalSec > 0
-        ? detailIntervalSec * 1000
-        : 30_000;
-
     const config = await loadConfig(resolveConfigPath(opts));
-    if (opts.showDead) config.display.showDead = true;
-    let lastHeavyAt = 0;
+    applyTerminalStyle(config.integration.tmux.badgeStyle);
+    const intervalSec = Number(opts.interval);
+    const intervalMs = Number.isFinite(intervalSec) && intervalSec > 0 ? intervalSec * 1000 : 2_000;
 
+    let agents = await requireDaemonSnapshot();
     while (true) {
-      const now = Date.now();
-      const needsHeavy = lastHeavyAt === 0 || now - lastHeavyAt >= detailIntervalMs;
-      const agents = await scanAgents(config, {
-        enrichmentMode: needsHeavy ? "full" : "light",
-      });
-      if (needsHeavy) lastHeavyAt = now;
       clearScreen();
       if (opts.json) {
         await printStatusJson(agents);
@@ -972,6 +1033,8 @@ program
         await printStatus(agents);
       }
       await sleep(intervalMs);
+      agents = await getAgentsSnapshot();
+      if (agents.length === 0) agents = []; // daemon stopped mid-loop
     }
   });
 
@@ -1031,6 +1094,61 @@ program
     await addMarmonitorPlugin(confPath);
     console.log("✓ Added marmonitor-tmux plugin to ~/.tmux.conf");
     console.log("Press prefix+I inside tmux to activate.");
+
+    // Start daemon if not already running
+    await startDaemon();
+  });
+
+program
+  .command("update-integration")
+  .description("Check how to sync the installed tmux integration")
+  .option("--quiet", "Suppress non-essential output")
+  .action(async (opts: { quiet?: boolean }) => {
+    const { detectTmuxIntegrationMode, getMarmonitorPluginDir } = await import("./tmux/setup.js");
+    const { homedir } = await import("node:os");
+    const { join } = await import("node:path");
+    const confPath = join(homedir(), ".tmux.conf");
+    const pluginDir = getMarmonitorPluginDir();
+    const mode = await detectTmuxIntegrationMode(confPath, pluginDir);
+
+    if (mode === "local") {
+      if (!opts.quiet) {
+        console.log("Local marmonitor-tmux run-shell detected.");
+        console.log("Your local repo changes are already active after tmux reload.");
+      }
+      return;
+    }
+
+    if (!mode) {
+      if (!opts.quiet) {
+        console.log("tmux integration is not configured. Run: marmonitor setup tmux");
+      }
+      return;
+    }
+
+    if (mode === "missing") {
+      if (!opts.quiet) {
+        console.log("tmux integration is configured, but marmonitor-tmux is not installed yet.");
+        console.log("Press prefix+I in tmux to install the plugin.");
+      }
+      return;
+    }
+
+    if (mode === "not_git") {
+      if (!opts.quiet) {
+        console.log("marmonitor-tmux exists but is not a git checkout.");
+        console.log(`Reinstall the plugin or update it manually: ${pluginDir}`);
+      }
+      return;
+    }
+
+    if (!opts.quiet) {
+      console.log("marmonitor-tmux TPM plugin detected.");
+      console.log("Update path:");
+      console.log("  1. Press prefix+U in tmux");
+      console.log(`  2. Or run: git -C ${pluginDir} pull --ff-only`);
+      console.log("  3. Reload tmux if keybindings or popup sizing changed");
+    }
   });
 
 program
@@ -1049,6 +1167,9 @@ program
       console.log("No marmonitor settings found in ~/.tmux.conf");
     }
 
+    // Stop daemon
+    await stopDaemon();
+
     // Restore tmux memory state (status bar → 1 line, remove status-format[1])
     try {
       const { execFile: ef } = await import("node:child_process");
@@ -1060,6 +1181,64 @@ program
     } catch {
       console.log("  tmux not running — restart tmux to apply changes");
     }
+
+    console.log("\nTo complete removal:");
+    console.log("  $ npm uninstall -g marmonitor");
+    console.log("\nOptional cleanup:");
+    console.log("  $ rm -rf ~/.config/marmonitor    # settings & session history");
+    console.log("  $ rm -rf ~/.tmux/plugins/marmonitor-tmux  # tpm plugin");
+  });
+
+async function startDaemon(): Promise<number | undefined> {
+  if (await isDaemonRunning(DAEMON_PID_PATH)) {
+    const pid = await readDaemonPid(DAEMON_PID_PATH);
+    console.log(`Daemon already running (PID: ${pid})`);
+    return undefined;
+  }
+  const { fork } = await import("node:child_process");
+  const { fileURLToPath } = await import("node:url");
+  const here = dirname(fileURLToPath(import.meta.url));
+  const child = fork(join(here, "..", "bin", "daemon.js"), [], { detached: true, stdio: "ignore" });
+  child.unref();
+  console.log(`✓ Daemon started (PID: ${child.pid})`);
+  return child.pid ?? undefined;
+}
+
+async function stopDaemon(): Promise<boolean> {
+  const pid = await readDaemonPid(DAEMON_PID_PATH);
+  if (!pid || !(await isDaemonRunning(DAEMON_PID_PATH))) {
+    console.log("Daemon is not running.");
+    return false;
+  }
+  process.kill(pid, "SIGTERM");
+  console.log(`✓ Daemon stopped (PID: ${pid})`);
+  return true;
+}
+
+program
+  .command("start")
+  .description("Start background scan daemon")
+  .action(async () => {
+    await startDaemon();
+    process.exit(0);
+  });
+
+program
+  .command("stop")
+  .description("Stop background scan daemon")
+  .action(async () => {
+    await stopDaemon();
+    process.exit(0);
+  });
+
+program
+  .command("restart")
+  .description("Restart background scan daemon")
+  .action(async () => {
+    await stopDaemon();
+    await new Promise((r) => setTimeout(r, 500));
+    await startDaemon();
+    process.exit(0);
   });
 
 installProcessSafetyHandlers();

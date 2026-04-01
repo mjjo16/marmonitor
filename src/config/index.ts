@@ -71,6 +71,7 @@ export interface MarmonitorConfig {
         dockToggle: string;
         directJump: string[];
       };
+      badgeStyle: "basic" | "basic-mono" | "text" | "text-mono";
     };
     wezterm: {
       enabled: boolean;
@@ -91,6 +92,7 @@ export interface MarmonitorConfig {
     snapshotTtlMs: number;
     statuslineTtlMs: number;
     stdoutHeuristicTtlMs: number;
+    daemonIntervalSec: number;
   };
 }
 
@@ -151,6 +153,7 @@ const DEFAULTS: MarmonitorConfig = {
         dockToggle: "m",
         directJump: ["M-1", "M-2", "M-3", "M-4", "M-5"],
       },
+      badgeStyle: "basic" as const,
     },
     wezterm: {
       enabled: false,
@@ -171,6 +174,7 @@ const DEFAULTS: MarmonitorConfig = {
     snapshotTtlMs: 2000,
     statuslineTtlMs: 2000,
     stdoutHeuristicTtlMs: 2000,
+    daemonIntervalSec: 2,
   },
 };
 

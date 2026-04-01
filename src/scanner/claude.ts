@@ -473,41 +473,198 @@ export async function detectClaudePhase(
   }
 }
 
-/** Parse Claude Code session file for enriched data */
-export async function parseClaudeSession(
-  pid: number,
-  config?: MarmonitorConfig,
-): Promise<Partial<AgentSession>> {
-  const sessionFile = getClaudeSessionRoots(config)
-    .map((root) => join(root, `${pid}.json`))
-    .find((candidate) => existsSync(candidate));
-  if (!sessionFile) return {};
+/**
+ * Read the first line of a JSONL file to extract session metadata.
+ * Returns undefined if the file can't be read or parsed.
+ */
+async function readJsonlFirstLine(
+  filePath: string,
+): Promise<{ sessionId?: string; cwd?: string; timestamp?: string } | undefined> {
+  let fd: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    const fileStat = await stat(sessionFile);
-    const raw = await readFile(sessionFile, "utf-8");
-    const data = JSON.parse(raw);
+    fd = await open(filePath, "r");
+    const buf = Buffer.alloc(4096);
+    await fd.read(buf, 0, 4096, 0);
+    const firstLine = buf.toString("utf-8").split("\n")[0];
+    if (!firstLine) return undefined;
+    return JSON.parse(firstLine);
+  } catch {
+    return undefined;
+  } finally {
+    await fd?.close().catch(() => {});
+  }
+}
+
+/**
+ * Match a Claude session by scanning JSONL files in the project directory.
+ * When processStartedAt is available, matches by JSONL creation timestamp
+ * (first-line timestamp) proximity to process start time.
+ * Falls back to the most recently modified JSONL when no start time is available.
+ */
+export async function matchClaudeSessionByMtime(
+  cwd: string,
+  processStartedAt: number | undefined,
+  config?: MarmonitorConfig,
+): Promise<Partial<AgentSession> | undefined> {
+  const projectDirName = await findClaudeProjectDir(cwd, undefined, config);
+  if (!projectDirName) return undefined;
+
+  const projectRoots = getClaudeProjectRoots(config);
+  const candidates: Array<{ path: string; mtimeMs: number }> = [];
+
+  for (const projectsDir of projectRoots) {
+    const projectDir = join(projectsDir, projectDirName);
+    if (!existsSync(projectDir)) continue;
+    try {
+      const files = await readdir(projectDir);
+      for (const file of files) {
+        if (!file.endsWith(".jsonl")) continue;
+        try {
+          const filePath = join(projectDir, file);
+          const fileStat = await stat(filePath);
+          candidates.push({ path: filePath, mtimeMs: fileStat.mtimeMs });
+        } catch {
+          // skip
+        }
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  if (candidates.length === 0) return undefined;
+
+  let bestPath: string | undefined;
+
+  if (processStartedAt) {
+    const startMs = processStartedAt * 1000;
+    // Pre-filter: only consider JSONL files modified after process start (with tolerance)
+    const active = candidates.filter(
+      (c) => c.mtimeMs >= startMs - CLAUDE_SESSION_MTIME_MATCH_SEC * 1000,
+    );
+    const pool = active.length > 0 ? active : candidates;
+
+    // Read first lines to get creation timestamps and match by proximity
+    const scored: Array<{ path: string; deltaSec: number; mtimeMs: number }> = [];
+    for (const c of pool) {
+      const firstLine = await readJsonlFirstLine(c.path);
+      if (!firstLine?.timestamp) continue;
+      const createdAt = new Date(firstLine.timestamp).getTime() / 1000;
+      scored.push({
+        path: c.path,
+        deltaSec: Math.abs(createdAt - processStartedAt),
+        mtimeMs: c.mtimeMs,
+      });
+    }
+
+    if (scored.length > 0) {
+      // Pick the JSONL whose creation time is closest to process start
+      scored.sort((a, b) => a.deltaSec - b.deltaSec);
+      // Only accept if within reasonable tolerance (5 minutes)
+      if (scored[0].deltaSec <= 300) {
+        bestPath = scored[0].path;
+      }
+    }
+
+    // Fallback: most recently modified
+    if (!bestPath) {
+      pool.sort((a, b) => b.mtimeMs - a.mtimeMs);
+      bestPath = pool[0].path;
+    }
+  } else {
+    // No process start time — pick most recently modified
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    bestPath = candidates[0].path;
+  }
+
+  // Read first line for session metadata
+  const entry = await readJsonlFirstLine(bestPath);
+  if (!entry?.sessionId) return undefined;
+
+  try {
+    const fileStat = await stat(bestPath);
+    const sessionCwd = entry.cwd ?? cwd;
 
     const result: Partial<AgentSession> = {
-      cwd: data.cwd,
-      sessionId: data.sessionId,
-      startedAt: data.startedAt ? data.startedAt / 1000 : undefined,
+      cwd: sessionCwd,
+      sessionId: entry.sessionId,
+      startedAt: entry.timestamp ? new Date(entry.timestamp).getTime() / 1000 : undefined,
       lastActivityAt: fileStat.mtimeMs / 1000,
       sessionMatched: true,
     };
 
-    if (data.sessionId && data.cwd) {
-      const tokenData = await parseClaudeTokens(
-        data.sessionId,
-        data.cwd,
-        data.startedAt ? data.startedAt / 1000 : undefined,
-        config,
-      );
-      result.tokenUsage = tokenData.tokenUsage;
-      result.model = tokenData.model;
-    }
+    // Register in session registry for subsequent lookups
+    upsertSessionRegistryEntry(claudeSessionRegistry, {
+      filePath: bestPath,
+      sessionId: entry.sessionId,
+      cwd: sessionCwd,
+      firstSeenOffset: 0,
+      startedAt: result.startedAt,
+      source: "claude",
+    });
+
+    const tokenData = await parseClaudeTokens(
+      entry.sessionId,
+      sessionCwd,
+      result.startedAt,
+      config,
+    );
+    result.tokenUsage = tokenData.tokenUsage;
+    result.model = tokenData.model;
 
     return result;
   } catch {
-    return {};
+    return undefined;
   }
+}
+
+/** Parse Claude Code session file for enriched data */
+export async function parseClaudeSession(
+  pid: number,
+  cwd?: string,
+  processStartedAt?: number,
+  config?: MarmonitorConfig,
+): Promise<Partial<AgentSession>> {
+  // 1st: try legacy sessions/{pid}.json
+  const sessionFile = getClaudeSessionRoots(config)
+    .map((root) => join(root, `${pid}.json`))
+    .find((candidate) => existsSync(candidate));
+  if (sessionFile) {
+    try {
+      const fileStat = await stat(sessionFile);
+      const raw = await readFile(sessionFile, "utf-8");
+      const data = JSON.parse(raw);
+
+      const result: Partial<AgentSession> = {
+        cwd: data.cwd,
+        sessionId: data.sessionId,
+        startedAt: data.startedAt ? data.startedAt / 1000 : undefined,
+        lastActivityAt: fileStat.mtimeMs / 1000,
+        sessionMatched: true,
+      };
+
+      if (data.sessionId && data.cwd) {
+        const tokenData = await parseClaudeTokens(
+          data.sessionId,
+          data.cwd,
+          data.startedAt ? data.startedAt / 1000 : undefined,
+          config,
+        );
+        result.tokenUsage = tokenData.tokenUsage;
+        result.model = tokenData.model;
+      }
+
+      return result;
+    } catch {
+      // fall through to mtime-based matching
+    }
+  }
+
+  // 2nd: match by JSONL mtime in project directory
+  if (cwd && cwd !== "unknown") {
+    const matched = await matchClaudeSessionByMtime(cwd, processStartedAt, config);
+    if (matched) return matched;
+  }
+
+  return {};
 }

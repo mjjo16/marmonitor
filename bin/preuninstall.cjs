@@ -13,6 +13,20 @@ try {
   const path = require("path");
   const os = require("os");
 
+  // Stop daemon if running
+  const pidPath = path.join(os.tmpdir(), "marmonitor", "daemon.pid");
+  try {
+    const pid = parseInt(fs.readFileSync(pidPath, "utf-8").trim(), 10);
+    if (!isNaN(pid)) {
+      process.kill(pid, "SIGTERM");
+      fs.unlinkSync(pidPath);
+      console.log("  marmonitor: daemon stopped");
+    }
+  } catch {
+    // daemon not running or already stopped
+  }
+
+  // Remove tmux plugin line
   const PLUGIN_LINE = "set -g @plugin 'mjjo16/marmonitor-tmux'";
   const confPath = path.join(os.homedir(), ".tmux.conf");
 
