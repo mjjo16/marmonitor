@@ -9,6 +9,7 @@ import type {
   WorkerProcess,
 } from "../types.js";
 import {
+  type BadgeStyle,
   type StatuslineFormat,
   buildAttentionFocusText,
   buildAttentionItems,
@@ -43,8 +44,17 @@ export async function getSystemInfo(): Promise<SystemInfo> {
 
 // shortenPath, formatElapsed, formatTokens imported from ./utils.js
 
+let monoMode = false;
+
+/** Apply badge style to terminal chalk output: mono uses bold/dim only */
+export function applyTerminalStyle(badgeStyle: BadgeStyle): void {
+  monoMode = badgeStyle === "basic-mono" || badgeStyle === "text-mono";
+}
+
 /** Agent name with distinct color */
 function agentLabel(name: string): string {
+  const label = name === "Claude Code" ? "Claude" : name;
+  if (monoMode) return chalk.bold.white(label);
   switch (name) {
     case "Claude Code":
       return chalk.hex("#D97706")("Claude"); // amber/orange
@@ -59,6 +69,20 @@ function agentLabel(name: string): string {
 
 /** Status icon/color */
 function statusLabel(status: AgentSession["status"]): string {
+  if (monoMode) {
+    switch (status) {
+      case "Active":
+        return chalk.white("[Active]   ");
+      case "Idle":
+        return chalk.gray("[Idle]     ");
+      case "Stalled":
+        return chalk.dim("[Stalled]  ");
+      case "Unmatched":
+        return chalk.dim("[Unmatched]");
+      case "Dead":
+        return chalk.dim("[Dead]     ");
+    }
+  }
   switch (status) {
     case "Active":
       return chalk.green("[Active]   ");
@@ -74,6 +98,12 @@ function statusLabel(status: AgentSession["status"]): string {
 }
 
 function displayStatusLabel(status: AgentSession["status"], phase?: SessionPhase): string {
+  if (monoMode) {
+    if (phase === "permission") return chalk.bold.white("[Allow]   ");
+    if (phase === "tool") return chalk.white("[Tool]    ");
+    if (phase === "thinking") return chalk.white("[Think]   ");
+    return statusLabel(status);
+  }
   if (phase === "permission") return chalk.red("[Allow]   ");
   if (phase === "tool") return chalk.green("[Tool]    ");
   if (phase === "thinking") return chalk.magenta("[Think]   ");
@@ -344,6 +374,49 @@ function jumpAttentionLine(item: ReturnType<typeof buildJumpAttentionItems>[numb
   return `  ${status} ${agent} ${chalk.dim(path)}${runtime}${icon}\n             PID:${item.pid}  ${stats}${started}${activity}`;
 }
 
+function paginateJumpAttentionItems<T>(items: T[], page: number, pageSize = 10): T[] {
+  const normalizedPage = Number.isInteger(page) && page > 0 ? page : 1;
+  const normalizedSize = Number.isInteger(pageSize) && pageSize > 0 ? pageSize : 10;
+  const start = (normalizedPage - 1) * normalizedSize;
+  return items.slice(start, start + normalizedSize);
+}
+
+export function renderJumpAttentionChooser(
+  agents: AgentSession[],
+  page = 1,
+  pageSize = 10,
+): string {
+  const items = buildJumpAttentionItems(agents);
+  if (items.length === 0) {
+    return "No jumpable attention items.";
+  }
+
+  const shown = paginateJumpAttentionItems(items, page, pageSize);
+  if (shown.length === 0) {
+    return "No jumpable attention items.";
+  }
+
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const lines = [
+    `Select session to jump to (${items.length}) — ${totalPages > 1 ? `< ${page}/${totalPages} >` : "< 1/1 >"}:`,
+  ];
+
+  shown.forEach((item, index) => {
+    const [firstLine, ...restLines] = jumpAttentionLine(item).split("\n");
+    const displayNumber = index + 1;
+    const indexLabel = `${displayNumber})`.padStart(displayNumber === 10 ? 4 : 3);
+    lines.push(`${indexLabel} ${firstLine.trimStart()}`);
+    for (const line of restLines) {
+      lines.push(`    ${line.trimStart()}`);
+    }
+    if (index < shown.length - 1) {
+      lines.push(chalk.dim("    ───────────────────────────────────────────────────────────"));
+    }
+  });
+
+  return lines.join("\n");
+}
+
 export function printAttention(agents: AgentSession[], limit = 12): void {
   const items = buildAttentionItems(agents);
   if (items.length === 0) {
@@ -392,26 +465,8 @@ export function printAttentionChooser(agents: AgentSession[], limit = 12): void 
   });
 }
 
-export function printJumpAttentionChooser(agents: AgentSession[], limit = 12): void {
-  const items = buildJumpAttentionItems(agents).slice(0, limit);
-  if (items.length === 0) {
-    console.log("No jumpable attention items.");
-    return;
-  }
-
-  console.log(`Select session to jump to (${items.length}):`);
-  items.forEach((item, index) => {
-    const [firstLine, ...restLines] = jumpAttentionLine(item).split("\n");
-    const indexLabel = `${index + 1})`.padStart(3);
-    console.log(`${indexLabel} ${firstLine.trimStart()}`);
-    for (const line of restLines) {
-      console.log(`    ${line.trimStart()}`);
-    }
-    if (index < items.length - 1) {
-      console.log(chalk.dim("    ───────────────────────────────────────────────────────────"));
-    }
-  });
-  console.log(chalk.dim("\nPress 1-9 to jump, 0 for item 10, q to cancel."));
+export function printJumpAttentionChooser(agents: AgentSession[], limit = 10): void {
+  console.log(renderJumpAttentionChooser(agents, 1, limit));
 }
 
 export function printJumpResult(result: TmuxJumpResult): void {
@@ -505,6 +560,8 @@ export async function renderStatusline(
   format: StatuslineFormat = "compact",
   attentionLimit = 5,
   width?: number,
+  badgeStyle: BadgeStyle = "basic",
+  hasJumpAnchor = false,
 ): Promise<string> {
   const alive = agents.filter((a) => a.status !== "Dead" && a.status !== "Unmatched");
   const unmatched = agents.filter((a) => a.status === "Unmatched");
@@ -545,8 +602,9 @@ export async function renderStatusline(
       buildJumpAttentionItems(agents),
       attentionLimit,
       width,
+      badgeStyle,
     );
-    return buildTmuxBadgeBar(snapshot, focusText);
+    return buildTmuxBadgeBar(snapshot, focusText, badgeStyle, hasJumpAnchor);
   }
 
   if (format === "wezterm-pills") {

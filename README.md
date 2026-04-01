@@ -170,6 +170,15 @@ The [marmonitor-tmux](https://github.com/mjjo16/marmonitor-tmux) plugin handles 
 
 All settings are customizable via `@marmonitor-*` options. See the [plugin README](https://github.com/mjjo16/marmonitor-tmux) for details.
 
+### Badge styles
+
+tmux badges and terminal text output can share one style via `integration.tmux.badgeStyle`.
+
+- `basic` — default colored pills
+- `basic-mono` — monochrome pills with Powerline borders
+- `text` — plain colored text, no filled background
+- `text-mono` — grayscale text only
+
 ## Configuration
 
 Config is loaded from (first found wins):
@@ -206,6 +215,7 @@ marmonitor settings-init --stdout
   },
   "integration": {
     "tmux": {
+      "badgeStyle": "basic",
       "keys": {
         "attentionPopup": "a",
         "jumpPopup": "j",
