@@ -16,8 +16,9 @@ async function main(): Promise<void> {
   process.title = "marmonitor-daemon";
   const config = await loadConfig();
 
+  const intervalSec = Math.max(1, Math.min(30, Math.floor(config.performance.daemonIntervalSec)));
   await runDaemonLoop(config, {
-    intervalMs: 2000,
+    intervalMs: intervalSec * 1000,
     detailIntervalMs: 30_000,
     snapshotPath: join(DAEMON_DIR, "daemon-snapshot.json"),
     pidPath: join(DAEMON_DIR, "daemon.pid"),

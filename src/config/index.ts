@@ -91,6 +91,7 @@ export interface MarmonitorConfig {
     snapshotTtlMs: number;
     statuslineTtlMs: number;
     stdoutHeuristicTtlMs: number;
+    daemonIntervalSec: number;
   };
 }
 
@@ -171,6 +172,7 @@ const DEFAULTS: MarmonitorConfig = {
     snapshotTtlMs: 2000,
     statuslineTtlMs: 2000,
     stdoutHeuristicTtlMs: 2000,
+    daemonIntervalSec: 2,
   },
 };
 
