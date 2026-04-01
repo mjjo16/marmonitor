@@ -34,6 +34,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: write
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -58,14 +59,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Bump version and publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to npm
         run: |
-          npm version patch --no-git-tag-version
           VERSION=$(node -p "require('./package.json').version")
-          git add package.json package-lock.json
-          git commit -m "chore: release v${VERSION}"
-          git tag "v${VERSION}"
-          git push origin main --tags
-          npm publish
+          git tag "v${VERSION}" || true
+          git push origin --tags || true
+          npm publish --provenance --access public
