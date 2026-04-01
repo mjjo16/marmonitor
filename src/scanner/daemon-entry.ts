@@ -13,7 +13,7 @@ const DAEMON_DIR = join(tmpdir(), "marmonitor");
 const CONFIG_DIR = getConfigDir();
 
 async function main(): Promise<void> {
-  process.title = "marmonitor-daemon";
+  process.title = "marmonitor";
   const config = await loadConfig();
 
   const intervalSec = Math.max(1, Math.min(30, Math.floor(config.performance.daemonIntervalSec)));
