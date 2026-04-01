@@ -95,6 +95,14 @@ marmonitor update-integration
 
 This checks whether your tmux integration also needs a TPM/plugin update.
 
+If you updated the TPM plugin with `prefix + U` but click actions or popup keybindings still behave like the old version, re-apply the plugin in the running tmux server:
+
+```bash
+tmux run-shell ~/.tmux/plugins/marmonitor-tmux/marmonitor.tmux
+```
+
+This mainly affects existing tmux sessions after a plugin upgrade. Fresh installs via `prefix + I` usually load the current bindings immediately.
+
 <details>
 <summary>Or add manually to ~/.tmux.conf</summary>
 
