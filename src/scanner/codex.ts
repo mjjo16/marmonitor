@@ -2,9 +2,11 @@
  * Codex session parsing, indexing, and phase detection.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { open, readFile, readdir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { indexCodexSessionsFromSqlite } from "./codex-sqlite.js";
 
 import type { MarmonitorConfig } from "../config/index.js";
 import { resolveRuntimeDataPaths } from "../config/index.js";
@@ -138,12 +140,50 @@ export async function detectCodexPhase(
   }
 }
 
-/** Build index of recent Codex sessions (last 7 days) */
+/** Find the latest Codex state SQLite DB path */
+function findCodexStateDb(): string | undefined {
+  const codexDir = join(homedir(), ".codex");
+  try {
+    const files = readdirSync(codexDir)
+      .filter((f) => f.startsWith("state_") && f.endsWith(".sqlite"))
+      .sort()
+      .reverse();
+    return files.length > 0 ? join(codexDir, files[0]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Build index of Codex sessions (SQLite primary, JSONL fallback) */
 export async function indexCodexSessions(config?: MarmonitorConfig): Promise<CodexSessionMeta[]> {
   if (codexIndexCache && Date.now() - codexIndexCache.builtAt < CODEX_INDEX_TTL_MS) {
     return codexIndexCache.sessions;
   }
 
+  // Primary: SQLite threads table
+  const dbPath = findCodexStateDb();
+  if (dbPath) {
+    const sqliteSessions = await indexCodexSessionsFromSqlite(dbPath);
+    if (sqliteSessions.length > 0) {
+      // Register sessions for phase detection and cwd lookup
+      for (const s of sqliteSessions) {
+        codexSessionFileCache.set(s.filePath, { ...s, mtimeMs: undefined, size: undefined });
+        upsertSessionRegistryEntry(codexSessionRegistry, {
+          filePath: s.filePath,
+          sessionId: s.id,
+          cwd: s.cwd,
+          firstSeenOffset: 0,
+          startedAt: s.timestamp,
+          model: s.model,
+          source: "codex",
+        });
+      }
+      setCodexIndexCache({ builtAt: Date.now(), sessions: sqliteSessions });
+      return sqliteSessions;
+    }
+  }
+
+  // Fallback: JSONL directory scan (last 7 days)
   const sessionRoots = getCodexSessionRoots(config);
   if (!sessionRoots.some((sessionsDir) => existsSync(sessionsDir))) return [];
 
