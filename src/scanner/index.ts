@@ -7,7 +7,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import pidusage from "pidusage";
 import psList from "ps-list";
@@ -23,7 +23,7 @@ export { parseGeminiSessionContent } from "./gemini.js";
 
 // ─── Internal imports ─────────────────────────────────────────────
 
-import { sessionEnrichmentCache } from "./cache.js";
+import { claudeSessionRegistry, sessionEnrichmentCache } from "./cache.js";
 import {
   detectClaudePhase,
   getClaudeSessionRoots,
@@ -123,7 +123,25 @@ export async function scanAgents(
         )
       : "hot"; // no cache = first time seeing this session, treat as hot
 
-    const useCachedEnrichment = cachedEnrichment && (!isFullEnrichment || tier === "cold"); // light: always use cache; full+cold: reuse cache
+    // Cold session JSONL mtime check: detect activity without full enrichment
+    let coldPromoted = false;
+    if (tier === "cold" && cachedEnrichment?.sessionId && agentName === "Claude Code") {
+      const regEntry = claudeSessionRegistry.get(cachedEnrichment.sessionId);
+      if (regEntry?.filePath) {
+        try {
+          const fileStat = await stat(regEntry.filePath);
+          const cachedActivity = (cachedEnrichment.lastActivityAt ?? 0) * 1000;
+          if (fileStat.mtimeMs > cachedActivity + 1000) {
+            coldPromoted = true; // JSONL changed → force enrichment
+          }
+        } catch {
+          // file gone or inaccessible — keep cold
+        }
+      }
+    }
+
+    const useCachedEnrichment =
+      cachedEnrichment && !coldPromoted && (!isFullEnrichment || tier === "cold");
 
     if (useCachedEnrichment) {
       if (cachedEnrichment.cwd) cwd = cachedEnrichment.cwd;
