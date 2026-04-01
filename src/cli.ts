@@ -1147,7 +1147,9 @@ program
       console.log("Update path:");
       console.log("  1. Press prefix+U in tmux");
       console.log(`  2. Or run: git -C ${pluginDir} pull --ff-only`);
-      console.log(`  3. Re-apply the plugin in the running tmux server: tmux run-shell ${join(pluginDir, "marmonitor.tmux")}`);
+      console.log(
+        `  3. Re-apply the plugin in the running tmux server: tmux run-shell ${join(pluginDir, "marmonitor.tmux")}`,
+      );
       console.log("  4. If the status bar still looks stale, reload tmux.conf or restart tmux");
     }
   });
