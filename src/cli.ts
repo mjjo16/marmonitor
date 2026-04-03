@@ -779,7 +779,7 @@ program
       sessionLastActivityAt = gemini.lastActivityAt;
       sessionLastResponseAt = gemini.lastResponseAt;
     } else if (agent.agentName === "Codex") {
-      const codexSessions = await indexCodexSessions(config);
+      const codexSessions = await indexCodexSessions(config, { activeCwds: [agent.cwd] });
       const matched = matchCodexSession(agent.cwd, agent.startedAt, codexSessions);
       sessionPhase = await detectCodexPhase(matched?.filePath, config);
       sessionSourceFile = matched?.filePath;

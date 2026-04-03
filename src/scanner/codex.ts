@@ -33,6 +33,8 @@ import type { CodexSessionMeta } from "./cache.js";
 
 export type { CodexSessionMeta } from "./cache.js";
 
+const CODEX_SQLITE_RECENT_DAYS = 7;
+
 export function getCodexSessionRoots(config?: MarmonitorConfig): string[] {
   return config
     ? resolveRuntimeDataPaths(config).codexSessions
@@ -155,8 +157,18 @@ function findCodexStateDb(): string | undefined {
 }
 
 /** Build index of Codex sessions (SQLite primary, JSONL fallback) */
-export async function indexCodexSessions(config?: MarmonitorConfig): Promise<CodexSessionMeta[]> {
-  if (codexIndexCache && Date.now() - codexIndexCache.builtAt < CODEX_INDEX_TTL_MS) {
+export async function indexCodexSessions(
+  config?: MarmonitorConfig,
+  options?: { activeCwds?: string[] },
+): Promise<CodexSessionMeta[]> {
+  const activeCwds = [...new Set((options?.activeCwds ?? []).filter(Boolean))];
+  const hasTargetedFilter = activeCwds.length > 0;
+
+  if (
+    !hasTargetedFilter &&
+    codexIndexCache &&
+    Date.now() - codexIndexCache.builtAt < CODEX_INDEX_TTL_MS
+  ) {
     return codexIndexCache.sessions;
   }
 
@@ -165,7 +177,10 @@ export async function indexCodexSessions(config?: MarmonitorConfig): Promise<Cod
   // Primary: SQLite threads table
   const dbPath = hasExplicitSessionRoots ? undefined : findCodexStateDb();
   if (dbPath) {
-    const sqliteSessions = await indexCodexSessionsFromSqlite(dbPath);
+    const sqliteSessions = await indexCodexSessionsFromSqlite(dbPath, {
+      recentUpdatedAfter: Math.floor(Date.now() / 1000) - CODEX_SQLITE_RECENT_DAYS * 86400,
+      includeCwds: activeCwds,
+    });
     if (sqliteSessions.length > 0) {
       // Register sessions for phase detection and cwd lookup
       for (const s of sqliteSessions) {
@@ -180,7 +195,9 @@ export async function indexCodexSessions(config?: MarmonitorConfig): Promise<Cod
           source: "codex",
         });
       }
-      setCodexIndexCache({ builtAt: Date.now(), sessions: sqliteSessions });
+      if (!hasTargetedFilter) {
+        setCodexIndexCache({ builtAt: Date.now(), sessions: sqliteSessions });
+      }
       return sqliteSessions;
     }
   }
