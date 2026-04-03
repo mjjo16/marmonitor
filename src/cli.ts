@@ -779,10 +779,27 @@ program
       sessionLastActivityAt = gemini.lastActivityAt;
       sessionLastResponseAt = gemini.lastResponseAt;
     } else if (agent.agentName === "Codex") {
+      const { loadCodexBindingRegistryFromFile, selectCodexBindingSession, buildCodexBindingKey } =
+        await import("./scanner/codex-binding-registry.js");
+      const { getConfigDir } = await import("./config/index.js");
+      const { join: pj } = await import("node:path");
       const codexSessions = await indexCodexSessions(config, { activeCwds: [agent.cwd] });
-      const matched = matchCodexSession(agent.cwd, agent.startedAt, codexSessions);
+      const bindingRegistry = new Map();
+      await loadCodexBindingRegistryFromFile(
+        pj(getConfigDir(), "codex-binding-registry.json"),
+        bindingRegistry,
+      );
+      const matched =
+        selectCodexBindingSession(
+          bindingRegistry,
+          agent.pid,
+          agent.processStartedAt,
+          agent.cwd,
+          codexSessions,
+        ) ?? matchCodexSession(agent.cwd, agent.processStartedAt, codexSessions);
       sessionPhase = await detectCodexPhase(matched?.filePath, config);
       sessionSourceFile = matched?.filePath;
+      sessionLastActivityAt = matched?.lastActivityAt;
     } else if (agent.agentName === "Claude Code" && agent.sessionId) {
       const phaseResult = await detectClaudePhase(
         agent.sessionId,
@@ -832,7 +849,7 @@ program
         pj(getConfigDir(), "codex-binding-registry.json"),
         bindingRegistry,
       );
-      const binding = bindingRegistry.get(buildCodexBindingKey(agent.pid, agent.startedAt));
+      const binding = bindingRegistry.get(buildCodexBindingKey(agent.pid, agent.processStartedAt));
       if (binding) {
         payload.codexBinding = {
           threadId: binding.threadId,
