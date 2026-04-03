@@ -3,8 +3,17 @@
  * Reuses watch/dock pattern: light scan every intervalMs, full every detailIntervalMs.
  */
 
-import { unlink } from "node:fs/promises";
+import { open, readdir, stat, unlink } from "node:fs/promises";
+import { join } from "node:path";
 import type { MarmonitorConfig } from "../config/index.js";
+import {
+  type ActivityEntry,
+  appendActivityEntries,
+  cleanupOldActivityLogs,
+  extractClaudeToolUses,
+  extractCodexToolUses,
+  formatDateKey,
+} from "./activity-log.js";
 import {
   type CodexBindingRegistry,
   loadCodexBindingRegistryFromFile,
@@ -29,6 +38,8 @@ export interface DaemonOptions {
   pidPath: string;
   registryPath: string;
   codexBindingRegistryPath: string;
+  activityLogDir: string;
+  activityRetentionDays: number;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -46,7 +57,13 @@ export async function runDaemonLoop(
     pidPath,
     registryPath,
     codexBindingRegistryPath,
+    activityLogDir,
+    activityRetentionDays,
   } = options;
+
+  // Activity log: per-session JSONL cursor offsets (in-memory only)
+  const activityCursors = new Map<string, number>();
+  let lastActivityCleanupAt = 0;
 
   await writeDaemonPid(pidPath, process.pid);
 
@@ -111,6 +128,86 @@ export async function runDaemonLoop(
         await saveRegistryToFile(registryPath, registry);
         pruneCodexBindingRegistry(codexBindingRegistry, 7);
         await saveCodexBindingRegistryToFile(codexBindingRegistryPath, codexBindingRegistry);
+
+        // Collect activity from session JSONLs (incremental cursor)
+        const today = formatDateKey(new Date(now));
+        const allEntries: ActivityEntry[] = [];
+
+        for (const agent of agents) {
+          if (!agent.sessionId) continue;
+          // Find JSONL path from enrichment cache or registry
+          const jsonlPath =
+            agent.agentName === "Codex"
+              ? codexBindingRegistry.get(`${agent.pid}:${agent.processStartedAt ?? 0}`)?.rolloutPath
+              : undefined;
+
+          // Claude: construct path from sessionId
+          let sessionFile: string | undefined;
+          if (agent.agentName === "Claude Code" && agent.sessionId && agent.cwd) {
+            const { getClaudeSessionRoots } = await import("./claude.js");
+            const roots = getClaudeSessionRoots(config);
+            for (const root of roots) {
+              try {
+                const dirs = await readdir(root);
+                for (const dir of dirs) {
+                  const candidate = join(root, dir, `${agent.sessionId}.jsonl`);
+                  try {
+                    await stat(candidate);
+                    sessionFile = candidate;
+                    break;
+                  } catch {
+                    // not here
+                  }
+                }
+                if (sessionFile) break;
+              } catch {
+                // root doesn't exist
+              }
+            }
+          } else if (agent.agentName === "Codex" && jsonlPath) {
+            sessionFile = jsonlPath;
+          }
+
+          if (!sessionFile) continue;
+
+          const cursorKey = sessionFile;
+          const prevOffset = activityCursors.get(cursorKey) ?? 0;
+
+          try {
+            const fileStat = await stat(sessionFile);
+            if (fileStat.size <= prevOffset) continue;
+
+            const fd = await open(sessionFile, "r");
+            try {
+              const buf = Buffer.alloc(fileStat.size - prevOffset);
+              await fd.read(buf, 0, buf.length, prevOffset);
+              const chunk = buf.toString("utf-8");
+              const lines = chunk.split("\n").filter(Boolean);
+
+              const entries =
+                agent.agentName === "Codex"
+                  ? extractCodexToolUses(lines, agent.sessionId, agent.agentName, agent.cwd)
+                  : extractClaudeToolUses(lines, agent.sessionId, agent.agentName, agent.cwd);
+
+              allEntries.push(...entries);
+              activityCursors.set(cursorKey, fileStat.size);
+            } finally {
+              await fd.close();
+            }
+          } catch {
+            // JSONL read failure — skip this session
+          }
+        }
+
+        if (allEntries.length > 0) {
+          await appendActivityEntries(activityLogDir, today, allEntries);
+        }
+
+        // Cleanup old activity logs (once per day)
+        if (now - lastActivityCleanupAt > 86400000) {
+          await cleanupOldActivityLogs(activityLogDir, activityRetentionDays);
+          lastActivityCleanupAt = now;
+        }
       }
     } catch (err) {
       // scan failures must never crash the daemon

@@ -1,21 +1,25 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { renderJumpAttentionChooser } from "../dist/output/index.js";
+import { formatDateKey } from "../dist/scanner/activity-log.js";
 import { parseSelectionInput, selectJumpAttentionItemOnPage } from "../dist/output/utils.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cliPath = join(repoRoot, "bin", "marmonitor.js");
 
-function runCli(args) {
+function runCli(args, envOverrides = {}) {
   return execFileSync("node", [cliPath, ...args], {
     cwd: repoRoot,
     encoding: "utf8",
     env: {
       ...process.env,
       TERM_PROGRAM: "Ghostty",
+      ...envOverrides,
     },
   });
 }
@@ -62,6 +66,50 @@ describe("config CLI helpers", () => {
     assert.match(output, /done/);
     assert.match(output, /Active/);
     assert.match(output, /Stalled/);
+  });
+
+  it("shows no activity when no local activity log exists", async () => {
+    const xdgRoot = await mkdir(join(tmpdir(), `marmonitor-cli-empty-${Date.now()}`), {
+      recursive: true,
+    });
+    try {
+      const output = runCli(["activity"], { XDG_CONFIG_HOME: xdgRoot });
+      assert.match(output, /No activity found\./);
+    } finally {
+      await rm(xdgRoot, { recursive: true });
+    }
+  });
+
+  it("prints activity log entries as json", async () => {
+    const xdgRoot = await mkdir(join(tmpdir(), `marmonitor-cli-activity-${Date.now()}`), {
+      recursive: true,
+    });
+    try {
+      const logDir = join(xdgRoot, "marmonitor", "activity-log");
+      await mkdir(logDir, { recursive: true });
+      const today = formatDateKey(new Date());
+      await writeFile(
+        join(logDir, `${today}.jsonl`),
+        `${JSON.stringify({
+          ts: 1775190000,
+          sid: "abc123456789",
+          agent: "Claude Code",
+          cwd: "/tmp/project",
+          tool: "Edit",
+          target: "src/cli.ts",
+          tokens: { in: 1, out: 73, cache: 1000 },
+        })}\n`,
+        "utf8",
+      );
+
+      const output = runCli(["activity", "--json"], { XDG_CONFIG_HOME: xdgRoot });
+      const parsed = JSON.parse(output);
+      assert.equal(parsed.length, 1);
+      assert.equal(parsed[0].tool, "Edit");
+      assert.equal(parsed[0].target, "src/cli.ts");
+    } finally {
+      await rm(xdgRoot, { recursive: true });
+    }
   });
 });
 
