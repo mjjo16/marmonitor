@@ -93,6 +93,7 @@ export interface MarmonitorConfig {
     statuslineTtlMs: number;
     stdoutHeuristicTtlMs: number;
     daemonIntervalSec: number;
+    activityRetentionDays: number;
   };
 }
 
@@ -175,6 +176,7 @@ const DEFAULTS: MarmonitorConfig = {
     statuslineTtlMs: 2000,
     stdoutHeuristicTtlMs: 2000,
     daemonIntervalSec: 2,
+    activityRetentionDays: 7,
   },
 };
 

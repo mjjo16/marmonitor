@@ -1072,6 +1072,104 @@ program
   });
 
 program
+  .command("activity")
+  .description("Show recent tool usage and token activity per session")
+  .option("--pid <pid>", "Filter by AI process PID")
+  .option("--session <sid>", "Filter by session ID (prefix match)")
+  .option("--days <n>", "Number of days to show", "1")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { getConfigDir } = await import("./config/index.js");
+    const { join: pj } = await import("node:path");
+    const { getRecentDateKeys, readActivityLog } = await import("./scanner/activity-log.js");
+
+    const logDir = pj(getConfigDir(), "activity-log");
+    const days = Math.max(1, Math.min(90, Number(opts.days) || 1));
+    const allEntries = [];
+
+    for (const dateStr of getRecentDateKeys(days)) {
+      const entries = await readActivityLog(logDir, dateStr);
+      allEntries.push(...entries);
+    }
+
+    // Filter
+    let filtered = allEntries;
+    if (opts.pid) {
+      const agents = await getAgentsSnapshot();
+      const agent = agents.find((a) => a.pid === Number(opts.pid));
+      if (agent?.sessionId) {
+        const sidPrefix = agent.sessionId.slice(0, 12);
+        filtered = filtered.filter((e) => e.sid.startsWith(sidPrefix));
+      } else {
+        filtered = [];
+      }
+    }
+    if (opts.session) {
+      const prefix = opts.session;
+      filtered = filtered.filter((e) => e.sid.startsWith(prefix));
+    }
+
+    if (opts.json) {
+      console.log(JSON.stringify(filtered, null, 2));
+      return;
+    }
+
+    if (filtered.length === 0) {
+      console.log("No activity found.");
+      return;
+    }
+
+    // Group by session
+    const bySession = new Map();
+    for (const e of filtered) {
+      const key = `${e.sid}|${e.agent}|${e.cwd}`;
+      if (!bySession.has(key)) bySession.set(key, []);
+      bySession.get(key).push(e);
+    }
+
+    for (const [key, entries] of bySession) {
+      const [sid, agent, cwd] = key.split("|");
+      const totalOut = entries.reduce(
+        (sum: number, e: Record<string, unknown>) =>
+          sum + ((e.tokens as Record<string, number>)?.out ?? 0),
+        0,
+      );
+      const totalCache = entries.reduce(
+        (sum: number, e: Record<string, unknown>) =>
+          sum + ((e.tokens as Record<string, number>)?.cache ?? 0),
+        0,
+      );
+      console.log(`\n${agent}  ${sid}...  ${cwd}`);
+      console.log(
+        `  ${entries.length} actions  out:${formatTokensShort(totalOut)}  cache:${formatTokensShort(totalCache)}`,
+      );
+      console.log("  ─────────────────────────────────────");
+      for (const e of entries.slice(-20)) {
+        const t = new Date(e.ts * 1000).toLocaleTimeString("en-GB", {
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        console.log(`  ${t}  ${e.tool}: ${truncateForDisplay(e.target, 60)}`);
+      }
+      if (entries.length > 20) {
+        console.log(`  ... +${entries.length - 20} more`);
+      }
+    }
+  });
+
+function formatTokensShort(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function truncateForDisplay(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  if (maxLength <= 3) return value.slice(0, maxLength);
+  return `${value.slice(0, maxLength - 3)}...`;
+}
+
+program
   .command("clean")
   .description("Show or terminate unmatched processes")
   .option("--config <path>", "Path to settings.json")
