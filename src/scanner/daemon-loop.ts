@@ -5,6 +5,12 @@
 
 import { unlink } from "node:fs/promises";
 import type { MarmonitorConfig } from "../config/index.js";
+import {
+  type CodexBindingRegistry,
+  loadCodexBindingRegistryFromFile,
+  pruneCodexBindingRegistry,
+  saveCodexBindingRegistryToFile,
+} from "./codex-binding-registry.js";
 import { writeDaemonPid, writeDaemonSnapshot } from "./daemon-utils.js";
 import { scanAgents } from "./index.js";
 import { perfEnd, perfStart } from "./perf.js";
@@ -22,6 +28,7 @@ export interface DaemonOptions {
   snapshotPath: string;
   pidPath: string;
   registryPath: string;
+  codexBindingRegistryPath: string;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -32,11 +39,19 @@ export async function runDaemonLoop(
   config: MarmonitorConfig,
   options: DaemonOptions,
 ): Promise<void> {
-  const { intervalMs, detailIntervalMs, snapshotPath, pidPath, registryPath } = options;
+  const {
+    intervalMs,
+    detailIntervalMs,
+    snapshotPath,
+    pidPath,
+    registryPath,
+    codexBindingRegistryPath,
+  } = options;
 
   await writeDaemonPid(pidPath, process.pid);
 
   const registry = new Map<string, SessionRegistryRecord>();
+  const codexBindingRegistry: CodexBindingRegistry = new Map();
 
   // Restore registry if saved recently (within 10 minutes)
   try {
@@ -49,6 +64,7 @@ export async function runDaemonLoop(
   } catch {
     // file missing or inaccessible — start fresh
   }
+  await loadCodexBindingRegistryFromFile(codexBindingRegistryPath, codexBindingRegistry);
 
   let lastHeavyAt = 0;
   let running = true;
@@ -58,6 +74,7 @@ export async function runDaemonLoop(
     running = false;
     // Save registry before exit
     await saveRegistryToFile(registryPath, registry);
+    await saveCodexBindingRegistryToFile(codexBindingRegistryPath, codexBindingRegistry);
     await unlink(pidPath).catch(() => {});
     process.exit(0);
   };
@@ -76,7 +93,10 @@ export async function runDaemonLoop(
 
     perfStart("daemon-scan");
     try {
-      const agents = await scanAgents(config, { enrichmentMode });
+      const agents = await scanAgents(config, {
+        enrichmentMode,
+        codexBindingRegistry,
+      });
       if (needsHeavy) lastHeavyAt = now;
 
       // Update session registry
@@ -89,6 +109,8 @@ export async function runDaemonLoop(
       if (needsHeavy) {
         pruneRegistry(registry, 30);
         await saveRegistryToFile(registryPath, registry);
+        pruneCodexBindingRegistry(codexBindingRegistry, 7);
+        await saveCodexBindingRegistryToFile(codexBindingRegistryPath, codexBindingRegistry);
       }
     } catch (err) {
       // scan failures must never crash the daemon

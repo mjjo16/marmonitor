@@ -30,6 +30,12 @@ import {
   parseClaudeSession,
   parseClaudeTokens,
 } from "./claude.js";
+import {
+  buildCodexBindingKey,
+  markMissingCodexBindingsDead,
+  selectCodexBindingSession,
+  upsertCodexBindingRecord,
+} from "./codex-binding-registry.js";
 import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./codex.js";
 import { promiseAllLimited } from "./concurrency.js";
 import { parseGeminiSession } from "./gemini.js";
@@ -55,6 +61,7 @@ export async function scanAgents(
 ): Promise<AgentSession[]> {
   const enrichmentMode = options.enrichmentMode ?? "full";
   const isFullEnrichment = enrichmentMode === "full";
+  const codexBindingRegistry = options.codexBindingRegistry;
   const seenPids = new Set<number>();
 
   perfStart("scanAgents");
@@ -86,8 +93,30 @@ export async function scanAgents(
   perfEnd("pidusage");
 
   // 3. Pre-index Codex sessions (once, shared across all Codex processes)
+  const codexCwdEntries = isFullEnrichment
+    ? await promiseAllLimited(
+        agentProcesses
+          .filter((item) => item.agentName === "Codex")
+          .map((item) => async () => ({
+            pid: item.proc.pid,
+            cwd: (await getProcessCwd(item.proc.pid)) ?? undefined,
+          })),
+        4,
+      )
+    : [];
+  const resolvedCodexCwds = codexCwdEntries.flatMap((entry) => (entry ? [entry] : []));
+  const activeCodexCwds = [
+    ...new Set(
+      resolvedCodexCwds.map((entry) => entry.cwd).filter((cwd): cwd is string => Boolean(cwd)),
+    ),
+  ];
+  const codexCwdByPid = new Map(
+    resolvedCodexCwds.filter((entry) => entry.cwd).map((entry) => [entry.pid, entry.cwd as string]),
+  );
   perfStart("codex-index");
-  const codexSessions = isFullEnrichment ? await indexCodexSessions(config) : [];
+  const codexSessions = isFullEnrichment
+    ? await indexCodexSessions(config, { activeCwds: activeCodexCwds })
+    : [];
   perfEnd("codex-index");
 
   // 4. Build sessions with enrichment (concurrency limited)
@@ -102,6 +131,7 @@ export async function scanAgents(
     let cwd = "unknown";
     let sessionId: string | undefined;
     let startedAt: number | undefined;
+    let processStartedAt: number | undefined;
     let tokenUsage: TokenUsage | undefined;
     let model: string | undefined;
     let sessionMatched = false;
@@ -147,6 +177,7 @@ export async function scanAgents(
       if (cachedEnrichment.cwd) cwd = cachedEnrichment.cwd;
       sessionId = cachedEnrichment.sessionId;
       startedAt = cachedEnrichment.startedAt;
+      processStartedAt = cachedEnrichment.processStartedAt;
       tokenUsage = cachedEnrichment.tokenUsage;
       model = cachedEnrichment.model;
       sessionMatched = cachedEnrichment.sessionMatched ?? false;
@@ -177,10 +208,23 @@ export async function scanAgents(
         lastActivityAt = phaseResult.lastActivityAt ?? lastActivityAt;
       }
     } else if (agentName === "Codex") {
-      cwd = cachedEnrichment?.cwd ?? (await getProcessCwd(proc.pid)) ?? "unknown";
-      const processStartTime = await getProcessStartTime(proc.pid);
+      cwd =
+        cachedEnrichment?.cwd ??
+        codexCwdByPid.get(proc.pid) ??
+        (await getProcessCwd(proc.pid)) ??
+        "unknown";
+      processStartedAt = await getProcessStartTime(proc.pid);
 
-      const matched = matchCodexSession(cwd, processStartTime, codexSessions);
+      const matched =
+        (codexBindingRegistry
+          ? selectCodexBindingSession(
+              codexBindingRegistry,
+              proc.pid,
+              processStartedAt,
+              cwd,
+              codexSessions,
+            )
+          : undefined) ?? matchCodexSession(cwd, processStartedAt, codexSessions);
       if (matched) {
         sessionMatched = true;
         sessionId = matched.id;
@@ -204,6 +248,16 @@ export async function scanAgents(
       if (phase !== "permission" && runtimeSource === "cli") {
         phase = (await detectCliStdoutPhase({ pid: proc.pid, cwd }, config)) ?? phase;
       }
+
+      if (codexBindingRegistry && matched) {
+        upsertCodexBindingRecord(codexBindingRegistry, {
+          pid: proc.pid,
+          processStartedAt,
+          cwd,
+          matched,
+          phase,
+        });
+      }
     } else if (agentName === "Gemini") {
       cwd = cachedEnrichment?.cwd ?? (await getProcessCwd(proc.pid)) ?? "unknown";
       const geminiData = await parseGeminiSession(cwd);
@@ -226,7 +280,7 @@ export async function scanAgents(
 
     const statusBaseAt = lastActivityAt ?? lastResponseAt ?? startedAt;
     const elapsed = statusBaseAt ? Date.now() / 1000 - statusBaseAt : undefined;
-    const status = determineStatus(cpuPercent, elapsed, sessionMatched, phase, config);
+    const status = determineStatus(cpuPercent, elapsed, sessionMatched, phase, config, agentName);
 
     const session = {
       agentName,
@@ -237,6 +291,7 @@ export async function scanAgents(
       memoryMb,
       status,
       startedAt,
+      processStartedAt,
       sessionId,
       tokenUsage,
       model,
@@ -252,6 +307,7 @@ export async function scanAgents(
         cwd: session.cwd,
         sessionId: session.sessionId,
         startedAt: session.startedAt,
+        processStartedAt: session.processStartedAt,
         tokenUsage: session.tokenUsage,
         model: session.model,
         sessionMatched: session.sessionMatched,
@@ -268,6 +324,15 @@ export async function scanAgents(
   const concurrencyLimit = isFullEnrichment ? 8 : 4;
   const results = await promiseAllLimited(sessionPromises, concurrencyLimit);
   const sessions: AgentSession[] = results.filter((s): s is AgentSession => s !== null);
+
+  if (codexBindingRegistry) {
+    const aliveCodexKeys = new Set(
+      sessions
+        .filter((session) => session.agentName === "Codex")
+        .map((session) => buildCodexBindingKey(session.pid, session.processStartedAt)),
+    );
+    markMissingCodexBindingsDead(codexBindingRegistry, aliveCodexKeys);
+  }
 
   // 5. Check for dead sessions (Claude: session file exists but process gone)
   if (config.display.showDead) {
