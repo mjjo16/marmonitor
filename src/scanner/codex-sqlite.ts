@@ -10,18 +10,50 @@ import type { CodexSessionMeta } from "./cache.js";
 
 const execFileAsync = promisify(execFile);
 
+export interface CodexSqliteIndexOptions {
+  recentUpdatedAfter?: number;
+  includeCwds?: string[];
+}
+
+function escapeSqlString(value: string): string {
+  return value.replaceAll("'", "''");
+}
+
+export function buildCodexThreadsQuery(options: CodexSqliteIndexOptions = {}): string {
+  const filters = ["archived = 0"];
+
+  const includeCwds = [...new Set((options.includeCwds ?? []).filter(Boolean))];
+  if (options.recentUpdatedAfter && includeCwds.length > 0) {
+    const inClause = includeCwds.map((cwd) => `'${escapeSqlString(cwd)}'`).join(", ");
+    filters.push(
+      `(updated_at >= ${Math.floor(options.recentUpdatedAfter)} OR cwd IN (${inClause}))`,
+    );
+  } else if (options.recentUpdatedAfter) {
+    filters.push(`updated_at >= ${Math.floor(options.recentUpdatedAfter)}`);
+  } else if (includeCwds.length > 0) {
+    const inClause = includeCwds.map((cwd) => `'${escapeSqlString(cwd)}'`).join(", ");
+    filters.push(`cwd IN (${inClause})`);
+  }
+
+  return [
+    "SELECT id, cwd, rollout_path, tokens_used, model, updated_at, created_at",
+    "FROM threads",
+    `WHERE ${filters.join(" AND ")}`,
+    "ORDER BY updated_at DESC;",
+  ].join(" ");
+}
+
 /**
  * Query Codex state SQLite for active (non-archived) threads.
  * Returns CodexSessionMeta[] compatible with existing matchCodexSession().
  */
-export async function indexCodexSessionsFromSqlite(dbPath: string): Promise<CodexSessionMeta[]> {
+export async function indexCodexSessionsFromSqlite(
+  dbPath: string,
+  options: CodexSqliteIndexOptions = {},
+): Promise<CodexSessionMeta[]> {
   try {
-    const { stdout } = await execFileAsync("sqlite3", [
-      dbPath,
-      "-separator",
-      "\t",
-      "SELECT id, cwd, rollout_path, tokens_used, model, updated_at, created_at FROM threads WHERE archived = 0 ORDER BY updated_at DESC;",
-    ]);
+    const query = buildCodexThreadsQuery(options);
+    const { stdout } = await execFileAsync("sqlite3", [dbPath, "-separator", "\t", query]);
 
     const lines = stdout.trim().split("\n").filter(Boolean);
     const sessions: CodexSessionMeta[] = [];
