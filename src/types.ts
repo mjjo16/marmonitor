@@ -34,6 +34,7 @@ export interface AgentSession {
   memoryMb: number;
   status: SessionStatus;
   startedAt?: number; // epoch seconds
+  processStartedAt?: number; // epoch seconds — OS process start time
   sessionId?: string;
   lastActivity?: string;
   tokenUsage?: TokenUsage;

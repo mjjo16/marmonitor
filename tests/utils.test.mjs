@@ -421,6 +421,11 @@ describe("determineStatus", () => {
     assert.equal(determineStatus(0.05, 45, true, 0.5, 30, "permission"), "Active");
   });
 
+  it("keeps recent Codex sessions active briefly even when CPU drops to zero", () => {
+    assert.equal(determineStatus(0.0, 20, true, 0.5, 30, undefined, 180, "Codex"), "Active");
+    assert.equal(determineStatus(0.0, 70, true, 0.5, 30, undefined, 180, "Codex"), "Idle");
+  });
+
   it("does not keep old active phases alive forever", () => {
     assert.equal(determineStatus(0.05, 400, true, 0.5, 30, "tool"), "Idle");
   });

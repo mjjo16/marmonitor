@@ -15,6 +15,7 @@ export function determineStatus(
   sessionMatched: boolean,
   phase: SessionPhase | undefined,
   config: MarmonitorConfig,
+  agentName?: string,
 ): SessionStatus {
   // Zombie: process exists but no matching session
   if (!sessionMatched) return "Unmatched";
@@ -22,11 +23,21 @@ export function determineStatus(
   // Active: CPU above threshold
   if (cpuPercent > config.status.activeCpuThreshold) return "Active";
 
-  // Permission/thinking override: these phases require user attention
-  // regardless of how long the process has been running
-  if (phase === "permission" || phase === "thinking") return "Idle";
+  // Recent active phases stay active briefly even after CPU bursts end.
+  if (
+    (phase === "permission" || phase === "thinking" || phase === "tool") &&
+    (elapsedSec === undefined || elapsedSec <= RECENT_ACTIVITY_ACTIVE_SEC)
+  ) {
+    return "Active";
+  }
 
-  if (phase === "tool" && (elapsedSec === undefined || elapsedSec <= RECENT_ACTIVITY_ACTIVE_SEC)) {
+  // Codex often drops to ~0% CPU immediately after a burst.
+  // Keep it active for a short recent-activity grace window even without a strong phase.
+  if (
+    agentName === "Codex" &&
+    elapsedSec !== undefined &&
+    elapsedSec <= Math.min(60, RECENT_ACTIVITY_ACTIVE_SEC)
+  ) {
     return "Active";
   }
 
