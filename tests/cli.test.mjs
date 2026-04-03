@@ -6,8 +6,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { renderJumpAttentionChooser } from "../dist/output/index.js";
-import { formatDateKey } from "../dist/scanner/activity-log.js";
 import { parseSelectionInput, selectJumpAttentionItemOnPage } from "../dist/output/utils.js";
+import { formatDateKey } from "../dist/scanner/activity-log.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cliPath = join(repoRoot, "bin", "marmonitor.js");
