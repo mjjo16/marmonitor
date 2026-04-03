@@ -128,6 +128,51 @@ describe("codex binding registry", () => {
     assert.equal(matched?.id, "019d1f7f");
   });
 
+  it("requires processStartedAt rather than thread timestamp for registry reuse", () => {
+    const registry = new Map([
+      [
+        "19077:1775000000",
+        {
+          pid: 19077,
+          processStartedAt: 1775000000,
+          cwd: "/Users/macrent/.ai/projects/mjjo",
+          threadId: "019d1f7f",
+          rolloutPath: "/tmp/rollout.jsonl",
+          lastVerifiedAt: 1775180138,
+          confidence: "high",
+          unstableCount: 0,
+        },
+      ],
+    ]);
+
+    const sessions = [
+      {
+        id: "019d1f7f",
+        cwd: "/Users/macrent/.ai/projects/mjjo",
+        filePath: "/tmp/rollout.jsonl",
+        timestamp: 1774349925,
+      },
+    ];
+
+    const wrong = selectCodexBindingSession(
+      registry,
+      19077,
+      1774349925,
+      "/Users/macrent/.ai/projects/mjjo",
+      sessions,
+    );
+    const correct = selectCodexBindingSession(
+      registry,
+      19077,
+      1775000000,
+      "/Users/macrent/.ai/projects/mjjo",
+      sessions,
+    );
+
+    assert.equal(wrong, undefined);
+    assert.equal(correct?.id, "019d1f7f");
+  });
+
   it("marks missing bindings dead and updates the existing binding in place", () => {
     const registry = new Map();
     upsertCodexBindingRecord(registry, {
