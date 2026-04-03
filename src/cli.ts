@@ -817,7 +817,33 @@ program
           }
         : null,
       paneOutput: paneOutput?.trimEnd() ?? null,
+      codexBinding: null as null | Record<string, unknown>,
     };
+
+    // Codex binding diagnostics
+    if (agent.agentName === "Codex") {
+      const { loadCodexBindingRegistryFromFile, buildCodexBindingKey } = await import(
+        "./scanner/codex-binding-registry.js"
+      );
+      const { getConfigDir } = await import("./config/index.js");
+      const { join: pj } = await import("node:path");
+      const bindingRegistry = new Map();
+      await loadCodexBindingRegistryFromFile(
+        pj(getConfigDir(), "codex-binding-registry.json"),
+        bindingRegistry,
+      );
+      const binding = bindingRegistry.get(buildCodexBindingKey(agent.pid, agent.startedAt));
+      if (binding) {
+        payload.codexBinding = {
+          threadId: binding.threadId,
+          rolloutPath: binding.rolloutPath,
+          confidence: binding.confidence,
+          unstableCount: binding.unstableCount,
+          lastVerifiedAt: binding.lastVerifiedAt,
+          deadAt: binding.deadAt ?? null,
+        };
+      }
+    }
 
     if (opts.json) {
       console.log(JSON.stringify(payload, null, 2));
@@ -836,6 +862,13 @@ program
     console.log(
       `tmux target: ${payload.tmuxTarget ? `${payload.tmuxTarget.pane} (${payload.tmuxTarget.match})` : "(none)"}`,
     );
+    if (payload.codexBinding) {
+      const b = payload.codexBinding;
+      console.log(
+        `Codex binding: thread=${b.threadId} confidence=${b.confidence} unstable=${b.unstableCount}`,
+      );
+      console.log(`  rollout: ${b.rolloutPath}`);
+    }
     console.log("Pane capture:");
     console.log(payload.paneOutput ?? "(none)");
   });
