@@ -113,10 +113,11 @@ export async function runDaemonLoop(
       const agents = await scanAgents(config, {
         enrichmentMode,
         codexBindingRegistry,
+        sessionRegistry: registry,
       });
       if (needsHeavy) lastHeavyAt = now;
 
-      // Update session registry
+      // Update session registry with lightweight agent metadata every scan.
       updateRegistry(registry, agents);
 
       // Write snapshot for statusline consumers
@@ -132,6 +133,7 @@ export async function runDaemonLoop(
         // Collect activity from session JSONLs (incremental cursor)
         const today = formatDateKey(new Date(now));
         const allEntries: ActivityEntry[] = [];
+        const registryUpdates = [];
 
         for (const agent of agents) {
           if (!agent.sessionId) continue;
@@ -169,6 +171,17 @@ export async function runDaemonLoop(
           }
 
           if (!sessionFile) continue;
+          registryUpdates.push({
+            agentName: agent.agentName,
+            pid: agent.pid,
+            sessionId: agent.sessionId,
+            cwd: agent.cwd,
+            startedAt: agent.startedAt,
+            tokenUsage: agent.tokenUsage,
+            lastActivityAt: agent.lastActivityAt,
+            model: agent.model,
+            jsonlPath: sessionFile,
+          });
 
           const cursorKey = sessionFile;
           const prevOffset = activityCursors.get(cursorKey) ?? 0;
@@ -201,6 +214,9 @@ export async function runDaemonLoop(
 
         if (allEntries.length > 0) {
           await appendActivityEntries(activityLogDir, today, allEntries);
+        }
+        if (registryUpdates.length > 0) {
+          updateRegistry(registry, registryUpdates);
         }
 
         // Cleanup old activity logs (once per day)
