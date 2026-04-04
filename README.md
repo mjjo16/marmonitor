@@ -139,7 +139,19 @@ npm link
 
 ## Quick Start
 
-Once installed, your tmux status bar automatically shows AI session badges. You also get:
+### Start the daemon
+
+marmonitor runs as a background daemon that scans your AI sessions every 2 seconds:
+
+```bash
+marmonitor start        # Start the daemon
+marmonitor stop         # Stop the daemon
+marmonitor restart      # Restart (e.g. after npm update)
+```
+
+The daemon must be running for all other commands to work. `marmonitor setup tmux` starts it automatically.
+
+### tmux shortcuts
 
 | Shortcut | Action |
 |----------|--------|
@@ -147,15 +159,32 @@ Once installed, your tmux status bar automatically shows AI session badges. You 
 | `prefix + j` | Jump popup — pick a session to jump to |
 | `prefix + m` | Dock — compact monitor pane |
 | `Option+1~5` | Direct jump to attention session #1~5 |
+| `Option+`` | Jump back to previous pane |
 
-CLI commands:
+### CLI commands
 
 ```bash
 marmonitor status       # Full session inventory
 marmonitor attention    # What needs your input?
+marmonitor activity     # What did each session do? (tool calls + tokens)
 marmonitor watch        # Live full-screen monitor
+marmonitor jump-back    # Return to pane before last jump
 marmonitor help         # All commands and options
 ```
+
+### Activity log
+
+Track what your AI sessions actually did — file edits, bash commands, tokens used:
+
+```bash
+marmonitor activity                  # Today's activity
+marmonitor activity --pid 1234       # Filter by PID
+marmonitor activity --session abc    # Filter by session ID
+marmonitor activity --days 3         # Last 3 days
+marmonitor activity --json           # JSON output
+```
+
+Activity is collected automatically by the daemon and stored in `~/.config/marmonitor/activity-log/` (7-day retention).
 
 ## Phase Icons
 
@@ -256,6 +285,10 @@ npm uninstall -g marmonitor         # Remove CLI
 - **No network** — zero outbound connections, all data stays local
 - **Conservative defaults** — all integrations are opt-in
 - **tmux-first** — terminal-native WezTerm/iTerm2 surfaces are currently paused
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release history and breaking changes.
 
 ## Contributing
 
