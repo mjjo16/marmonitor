@@ -18,6 +18,7 @@ export const CLAUDE_SESSION_AMBIGUITY_GAP_SEC = 300;
 export const CLAUDE_PHASE_RECENT_LINES = 50;
 export const CODEX_PHASE_RECENT_LINES = 30;
 export const RECENT_ACTIVITY_ACTIVE_SEC = 180;
+export const STATUS_HYSTERESIS_SEC = 30;
 
 // ─── Cache Entry Types ─────────────────────────────────────────────
 

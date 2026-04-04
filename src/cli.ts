@@ -42,6 +42,7 @@ import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./scann
 import { isDaemonRunning, readDaemonPid, readDaemonSnapshot } from "./scanner/daemon-utils.js";
 import { parseGeminiSession } from "./scanner/gemini.js";
 import { scanAgents } from "./scanner/index.js";
+import { loadRegistryFromFile } from "./scanner/session-registry.js";
 import { detectCliStdoutPhase } from "./scanner/status.js";
 import { captureTmuxPaneOutput, jumpToAgent, resolveTmuxJumpTarget } from "./tmux/index.js";
 import { getClientTty, jumpBack } from "./tmux/jump-anchor.js";
@@ -523,6 +524,14 @@ async function requireDaemonSnapshot(): Promise<AgentSession[]> {
   return agents;
 }
 
+async function loadSessionRegistry(): Promise<
+  Map<string, import("./scanner/session-registry.js").SessionRegistryRecord>
+> {
+  const registry = new Map<string, import("./scanner/session-registry.js").SessionRegistryRecord>();
+  await loadRegistryFromFile(join(getConfigDir(), "session-registry.json"), registry);
+  return registry;
+}
+
 program
   .option("--statusline", "One-line summary for tmux statusbar")
   .option(
@@ -736,7 +745,10 @@ program
 
     let agents: AgentSession[];
     try {
-      agents = await scanAgents(config, { enrichmentMode: "full" });
+      agents = await scanAgents(config, {
+        enrichmentMode: "full",
+        sessionRegistry: await loadSessionRegistry(),
+      });
     } catch (error) {
       const payload = {
         found: false,
@@ -1195,7 +1207,7 @@ program
   .option("--pid <pid...>", "Only include specific unmatched PID(s)")
   .action(async (opts) => {
     const config = await loadConfig(resolveConfigPath(opts));
-    const agents = await scanAgents(config);
+    const agents = await scanAgents(config, { sessionRegistry: await loadSessionRegistry() });
     const selectedPids = Array.isArray(opts.pid)
       ? opts.pid
           .map((value: string) => Number.parseInt(value, 10))

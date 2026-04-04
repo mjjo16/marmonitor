@@ -481,10 +481,13 @@ export function buildAttentionItems(
   agents: AgentSession[],
   nowSec = Date.now() / 1000,
 ): AttentionItem[] {
-  const alive = agents.filter(
-    (agent) =>
-      agent.status !== "Dead" && agent.status !== "Unmatched" && agent.status !== "Stalled",
-  );
+  const alive = agents.filter((agent) => {
+    const kind = attentionKind(agent);
+    if (kind === "permission" || kind === "thinking" || kind === "tool") {
+      return true;
+    }
+    return agent.status !== "Dead" && agent.status !== "Unmatched" && agent.status !== "Stalled";
+  });
 
   const toAttentionItem = (
     agent: AgentSession,

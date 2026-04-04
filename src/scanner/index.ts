@@ -48,7 +48,12 @@ import {
   getProcessStartTime,
 } from "./process.js";
 import { classifySessionTier } from "./session-tier.js";
-import { detectCliStdoutPhase, determineStatus } from "./status.js";
+import {
+  applyStatusHysteresis,
+  detectCliStdoutPhase,
+  determineStatus,
+  refreshLastActivityAt,
+} from "./status.js";
 
 import type { ScanOptions } from "./types.js";
 
@@ -62,6 +67,7 @@ export async function scanAgents(
   const enrichmentMode = options.enrichmentMode ?? "full";
   const isFullEnrichment = enrichmentMode === "full";
   const codexBindingRegistry = options.codexBindingRegistry;
+  const sessionRegistry = options.sessionRegistry;
   const seenPids = new Set<number>();
 
   perfStart("scanAgents");
@@ -229,7 +235,8 @@ export async function scanAgents(
         sessionMatched = true;
         sessionId = matched.id;
         startedAt = matched.timestamp;
-        lastActivityAt = matched.lastActivityAt;
+        lastActivityAt =
+          Math.max(cachedEnrichment?.lastActivityAt ?? 0, matched.lastActivityAt ?? 0) || undefined;
         model = matched.model;
         codexSessionFile = matched.filePath;
         if (matched.totalTokenUsage) {
@@ -255,9 +262,18 @@ export async function scanAgents(
           processStartedAt,
           cwd,
           matched,
-          phase,
         });
       }
+
+      lastActivityAt = refreshLastActivityAt(
+        lastActivityAt,
+        cpuPercent,
+        phase,
+        config.status.activeCpuThreshold,
+        agentName,
+      );
+      lastActivityAt =
+        Math.max(cachedEnrichment?.lastActivityAt ?? 0, lastActivityAt ?? 0) || undefined;
     } else if (agentName === "Gemini") {
       cwd = cachedEnrichment?.cwd ?? (await getProcessCwd(proc.pid)) ?? "unknown";
       const geminiData = await parseGeminiSession(cwd);
@@ -274,13 +290,32 @@ export async function scanAgents(
       }
     }
 
+    if (sessionId && sessionRegistry?.has(sessionId)) {
+      const persistedLastActivityAt = sessionRegistry.get(sessionId)?.lastActivityAt;
+      lastActivityAt = Math.max(lastActivityAt ?? 0, persistedLastActivityAt ?? 0) || undefined;
+    }
+
     if (cwd === "unknown" && isFullEnrichment) {
       cwd = cachedEnrichment?.cwd ?? (await getProcessCwd(proc.pid)) ?? "unknown";
     }
 
     const statusBaseAt = lastActivityAt ?? lastResponseAt ?? startedAt;
     const elapsed = statusBaseAt ? Date.now() / 1000 - statusBaseAt : undefined;
-    const status = determineStatus(cpuPercent, elapsed, sessionMatched, phase, config, agentName);
+    const rawStatus = determineStatus(
+      cpuPercent,
+      elapsed,
+      sessionMatched,
+      phase,
+      config,
+      agentName,
+    );
+    const status = applyStatusHysteresis(
+      rawStatus,
+      cachedEnrichment?.status as AgentSession["status"] | undefined,
+      elapsed,
+      phase,
+      agentName,
+    );
 
     const session = {
       agentName,
@@ -311,6 +346,7 @@ export async function scanAgents(
         tokenUsage: session.tokenUsage,
         model: session.model,
         sessionMatched: session.sessionMatched,
+        status: session.status,
         phase: session.phase,
         lastResponseAt: session.lastResponseAt,
         lastActivityAt: session.lastActivityAt,

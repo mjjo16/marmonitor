@@ -5,7 +5,6 @@
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { SessionPhase } from "../types.js";
 import type { CodexSessionMeta } from "./cache.js";
 
 export interface CodexBindingRecord {
@@ -14,10 +13,6 @@ export interface CodexBindingRecord {
   cwd: string;
   threadId: string;
   rolloutPath: string;
-  threadCreatedAt?: number;
-  threadUpdatedAt?: number;
-  lastActivityAt?: number;
-  lastPhase?: SessionPhase;
   lastVerifiedAt: number;
   confidence: "high" | "medium" | "low";
   unstableCount: number;
@@ -57,11 +52,10 @@ export function upsertCodexBindingRecord(
     processStartedAt?: number;
     cwd: string;
     matched: CodexSessionMeta;
-    phase?: SessionPhase;
     confidence?: CodexBindingRecord["confidence"];
   },
 ): void {
-  const { pid, processStartedAt, cwd, matched, phase, confidence = "high" } = params;
+  const { pid, processStartedAt, cwd, matched, confidence = "high" } = params;
   const key = buildCodexBindingKey(pid, processStartedAt);
   const previous = registry.get(key);
   const now = Math.floor(Date.now() / 1000);
@@ -75,10 +69,6 @@ export function upsertCodexBindingRecord(
     cwd,
     threadId: matched.id,
     rolloutPath: matched.filePath,
-    threadCreatedAt: matched.timestamp,
-    threadUpdatedAt: matched.lastActivityAt,
-    lastActivityAt: matched.lastActivityAt,
-    lastPhase: phase,
     lastVerifiedAt: now,
     confidence,
     unstableCount: isChanged ? (previous?.unstableCount ?? 0) + 1 : (previous?.unstableCount ?? 0),

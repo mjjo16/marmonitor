@@ -36,6 +36,21 @@ describe("session registry", () => {
     assert.equal(entry.history[0].pid, 1234);
   });
 
+  it("stores jsonlPath on first insert when provided", () => {
+    const registry = new Map();
+    updateRegistry(registry, [
+      {
+        agentName: "Claude Code",
+        pid: 1234,
+        sessionId: "abc",
+        cwd: "/projects/test",
+        jsonlPath: "/projects/test/.claude/session.jsonl",
+        startedAt: 1774000000,
+      },
+    ]);
+    assert.equal(registry.get("abc").history[0].jsonlPath, "/projects/test/.claude/session.jsonl");
+  });
+
   it("appends to history when PID changes for same sessionId", () => {
     const registry = new Map();
     updateRegistry(registry, [
@@ -85,6 +100,61 @@ describe("session registry", () => {
     assert.equal(registry.get("abc").history.length, 1);
   });
 
+  it("fills missing jsonlPath without appending history", () => {
+    const registry = new Map();
+    updateRegistry(registry, [
+      {
+        agentName: "Claude Code",
+        pid: 1234,
+        sessionId: "abc",
+        cwd: "/projects/test",
+        startedAt: 1774000000,
+      },
+    ]);
+    updateRegistry(registry, [
+      {
+        agentName: "Claude Code",
+        pid: 1234,
+        sessionId: "abc",
+        cwd: "/projects/test",
+        jsonlPath: "/projects/test/.claude/session.jsonl",
+        startedAt: 1774000000,
+      },
+    ]);
+    const entry = registry.get("abc");
+    assert.equal(entry.history.length, 1);
+    assert.equal(entry.history[0].jsonlPath, "/projects/test/.claude/session.jsonl");
+  });
+
+  it("appends history when jsonlPath changes for the same PID", () => {
+    const registry = new Map();
+    updateRegistry(registry, [
+      {
+        agentName: "Claude Code",
+        pid: 1234,
+        sessionId: "abc",
+        cwd: "/projects/test",
+        jsonlPath: "/projects/test/.claude/session-1.jsonl",
+        startedAt: 1774000000,
+      },
+    ]);
+    updateRegistry(registry, [
+      {
+        agentName: "Claude Code",
+        pid: 1234,
+        sessionId: "abc",
+        cwd: "/projects/test",
+        jsonlPath: "/projects/test/.claude/session-2.jsonl",
+        startedAt: 1774003600,
+      },
+    ]);
+    const entry = registry.get("abc");
+    assert.equal(entry.history.length, 2);
+    assert.equal(entry.history[0].jsonlPath, "/projects/test/.claude/session-1.jsonl");
+    assert.equal(entry.history[1].jsonlPath, "/projects/test/.claude/session-2.jsonl");
+    assert.equal(entry.history[0].endedAt !== undefined, true);
+  });
+
   it("skips sessions without sessionId", () => {
     const registry = new Map();
     updateRegistry(registry, [{ agentName: "Claude Code", pid: 1234, cwd: "/projects/test" }]);
@@ -111,6 +181,31 @@ describe("session registry", () => {
     assert.equal(entry.totalTokens.input, 100);
     assert.equal(entry.totalTokens.output, 200);
     assert.equal(entry.totalTokens.cache, 50);
+  });
+
+  it("keeps the newer lastActivityAt when older updates arrive later", () => {
+    const registry = new Map();
+    updateRegistry(registry, [
+      {
+        agentName: "Codex",
+        pid: 71304,
+        sessionId: "019d1f7f",
+        cwd: "/repo",
+        startedAt: 1775204196,
+        lastActivityAt: 1775267514,
+      },
+    ]);
+    updateRegistry(registry, [
+      {
+        agentName: "Codex",
+        pid: 71304,
+        sessionId: "019d1f7f",
+        cwd: "/repo",
+        startedAt: 1775204196,
+        lastActivityAt: 1775194317,
+      },
+    ]);
+    assert.equal(registry.get("019d1f7f").lastActivityAt, 1775267514);
   });
 
   it("saves and loads registry from file", async () => {
