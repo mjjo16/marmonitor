@@ -33,10 +33,6 @@ describe("codex binding registry", () => {
             cwd: "/Users/macrent/.ai/projects/mjjo",
             threadId: "019d1f7f",
             rolloutPath: "/tmp/rollout.jsonl",
-            threadCreatedAt: 1774349925,
-            threadUpdatedAt: 1775180138,
-            lastActivityAt: 1775180138,
-            lastPhase: "tool",
             lastVerifiedAt: 1775180138,
             confidence: "high",
             unstableCount: 0,
@@ -186,7 +182,6 @@ describe("codex binding registry", () => {
         timestamp: 1774349925,
         lastActivityAt: 1775180138,
       },
-      phase: "tool",
     });
 
     const updated = markMissingCodexBindingsDead(registry, new Set());

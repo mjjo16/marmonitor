@@ -867,6 +867,52 @@ describe("buildAttentionItems", () => {
     );
   });
 
+  it("keeps stalled thinking/tool items visible in attention ordering", () => {
+    const now = 5_000;
+    const agents = [
+      {
+        pid: 10,
+        agentName: "Claude Code",
+        cwd: "/repo/stalled-thinking",
+        status: "Stalled",
+        phase: "thinking",
+        lastActivityAt: 4_200,
+      },
+      {
+        pid: 20,
+        agentName: "Codex",
+        cwd: "/repo/stalled-tool",
+        status: "Stalled",
+        phase: "tool",
+        lastActivityAt: 4_100,
+      },
+      {
+        pid: 30,
+        agentName: "Claude Code",
+        cwd: "/repo/idle",
+        status: "Idle",
+        lastActivityAt: 4_300,
+      },
+      {
+        pid: 40,
+        agentName: "Claude Code",
+        cwd: "/repo/stalled-done",
+        status: "Stalled",
+        phase: "done",
+        lastActivityAt: 4_400,
+      },
+    ];
+
+    assert.deepEqual(
+      buildAttentionItems(agents, now).map((item) => [item.kind, item.pid]),
+      [
+        ["active", 30],
+        ["thinking", 10],
+        ["tool", 20],
+      ],
+    );
+  });
+
   it("selects an attention item by 1-based index", () => {
     const agents = [
       { pid: 20, agentName: "Codex", cwd: "/repo/b", status: "Unmatched" },
