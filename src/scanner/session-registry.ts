@@ -26,34 +26,47 @@ export interface SessionRegistryRecord {
   model?: string;
 }
 
+export interface SessionRegistryUpdate extends Partial<AgentSession> {
+  jsonlPath?: string;
+}
+
 export function updateRegistry(
   registry: Map<string, SessionRegistryRecord>,
-  agents: Partial<AgentSession>[],
+  agents: SessionRegistryUpdate[],
 ): void {
   for (const agent of agents) {
     if (!agent.sessionId) continue;
 
     const existing = registry.get(agent.sessionId);
     if (existing) {
-      // Check if PID changed (resume)
       const lastEntry = existing.history[existing.history.length - 1];
-      if (lastEntry && lastEntry.pid !== agent.pid) {
-        // Mark previous as ended
+      const nextPid = agent.pid ?? 0;
+      const nextStartedAt = agent.startedAt ?? Math.floor(Date.now() / 1000);
+      const nextJsonlPath = agent.jsonlPath;
+      const pidChanged = Boolean(lastEntry && lastEntry.pid !== nextPid);
+      const jsonlChanged = Boolean(
+        lastEntry && nextJsonlPath && lastEntry.jsonlPath && lastEntry.jsonlPath !== nextJsonlPath,
+      );
+
+      if (lastEntry && (pidChanged || jsonlChanged)) {
         if (!lastEntry.endedAt) lastEntry.endedAt = Math.floor(Date.now() / 1000);
-        // Add new PID to history
         existing.history.push({
-          pid: agent.pid ?? 0,
-          startedAt: agent.startedAt ?? Math.floor(Date.now() / 1000),
+          pid: nextPid,
+          jsonlPath: nextJsonlPath,
+          startedAt: nextStartedAt,
         });
+      } else if (lastEntry && nextJsonlPath && !lastEntry.jsonlPath) {
+        lastEntry.jsonlPath = nextJsonlPath;
       }
 
-      // Update token totals
       if (agent.tokenUsage) {
         existing.totalTokens.input = agent.tokenUsage.inputTokens ?? 0;
         existing.totalTokens.output = agent.tokenUsage.outputTokens ?? 0;
         existing.totalTokens.cache = agent.tokenUsage.cacheReadTokens ?? 0;
       }
-      if (agent.lastActivityAt) existing.lastActivityAt = agent.lastActivityAt;
+      if (agent.lastActivityAt) {
+        existing.lastActivityAt = Math.max(existing.lastActivityAt ?? 0, agent.lastActivityAt);
+      }
       if (agent.model) existing.model = agent.model;
       if (agent.cwd) existing.cwd = agent.cwd;
     } else {
@@ -65,6 +78,7 @@ export function updateRegistry(
         history: [
           {
             pid: agent.pid ?? 0,
+            jsonlPath: agent.jsonlPath,
             startedAt: agent.startedAt ?? Math.floor(Date.now() / 1000),
           },
         ],

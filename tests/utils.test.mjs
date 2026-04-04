@@ -421,6 +421,11 @@ describe("determineStatus", () => {
     assert.equal(determineStatus(0.05, 45, true, 0.5, 30, "permission"), "Active");
   });
 
+  it("keeps recent Codex sessions active briefly even when CPU drops to zero", () => {
+    assert.equal(determineStatus(0.0, 20, true, 0.5, 30, undefined, 180, "Codex"), "Active");
+    assert.equal(determineStatus(0.0, 70, true, 0.5, 30, undefined, 180, "Codex"), "Idle");
+  });
+
   it("does not keep old active phases alive forever", () => {
     assert.equal(determineStatus(0.05, 400, true, 0.5, 30, "tool"), "Idle");
   });
@@ -858,6 +863,52 @@ describe("buildAttentionItems", () => {
         ["active", 50],
         ["thinking", 30],
         ["tool", 40],
+      ],
+    );
+  });
+
+  it("keeps stalled thinking/tool items visible in attention ordering", () => {
+    const now = 5_000;
+    const agents = [
+      {
+        pid: 10,
+        agentName: "Claude Code",
+        cwd: "/repo/stalled-thinking",
+        status: "Stalled",
+        phase: "thinking",
+        lastActivityAt: 4_200,
+      },
+      {
+        pid: 20,
+        agentName: "Codex",
+        cwd: "/repo/stalled-tool",
+        status: "Stalled",
+        phase: "tool",
+        lastActivityAt: 4_100,
+      },
+      {
+        pid: 30,
+        agentName: "Claude Code",
+        cwd: "/repo/idle",
+        status: "Idle",
+        lastActivityAt: 4_300,
+      },
+      {
+        pid: 40,
+        agentName: "Claude Code",
+        cwd: "/repo/stalled-done",
+        status: "Stalled",
+        phase: "done",
+        lastActivityAt: 4_400,
+      },
+    ];
+
+    assert.deepEqual(
+      buildAttentionItems(agents, now).map((item) => [item.kind, item.pid]),
+      [
+        ["active", 30],
+        ["thinking", 10],
+        ["tool", 20],
       ],
     );
   });

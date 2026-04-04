@@ -23,6 +23,9 @@ async function main(): Promise<void> {
     snapshotPath: join(DAEMON_DIR, "daemon-snapshot.json"),
     pidPath: join(DAEMON_DIR, "daemon.pid"),
     registryPath: join(CONFIG_DIR, "session-registry.json"),
+    codexBindingRegistryPath: join(CONFIG_DIR, "codex-binding-registry.json"),
+    activityLogDir: join(CONFIG_DIR, "activity-log"),
+    activityRetentionDays: config.performance.activityRetentionDays,
   });
 }
 

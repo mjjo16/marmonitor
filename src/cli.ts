@@ -42,6 +42,7 @@ import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./scann
 import { isDaemonRunning, readDaemonPid, readDaemonSnapshot } from "./scanner/daemon-utils.js";
 import { parseGeminiSession } from "./scanner/gemini.js";
 import { scanAgents } from "./scanner/index.js";
+import { loadRegistryFromFile } from "./scanner/session-registry.js";
 import { detectCliStdoutPhase } from "./scanner/status.js";
 import { captureTmuxPaneOutput, jumpToAgent, resolveTmuxJumpTarget } from "./tmux/index.js";
 import { getClientTty, jumpBack } from "./tmux/jump-anchor.js";
@@ -116,6 +117,7 @@ function buildHelpAppendix(): string {
     "Core workflows:",
     "  status        Full one-shot inventory of local AI sessions",
     "  attention     Priority list for sessions that need review",
+    "  activity      Show recent tool usage and tokens per session",
     "  watch         Live full-screen monitor",
     "  dock          Persistent tmux-friendly monitor",
     "  --statusline  Status bar output for tmux",
@@ -160,11 +162,34 @@ function buildHelpAppendix(): string {
     "  integration.tmux.keys.*",
     "  paths.* (runtime data path overrides)",
     "",
+    "Daemon:",
+    "  start         Start background scan daemon (required before use)",
+    "  stop          Stop daemon",
+    "  restart       Restart daemon (e.g. after update)",
+    "  activity      Show what each session did (tool calls + tokens)",
+    "",
+    "Activity log options:",
+    "  --pid <pid>       Filter by process ID",
+    "  --session <sid>   Filter by session ID prefix",
+    "  --days <n>        Number of days to show (default: 1)",
+    "  --json            JSON output",
+    "",
+    "Navigation:",
+    "  jump --pid <pid>  Jump to a session's tmux pane",
+    "  jump --attention  Interactive jump chooser",
+    "  jump-back         Return to pane before last jump",
+    "",
+    "Integration:",
+    "  setup tmux              Add tmux plugin to ~/.tmux.conf",
+    "  update-integration      Check tmux plugin sync status",
+    "  uninstall-integration   Remove tmux integration",
+    "",
     "Default tmux shortcuts:",
     "  Prefix+a      Attention popup",
     "  Prefix+j      Jump popup",
     "  Prefix+m      Toggle dock",
     "  Option+1..5   Direct jump to numbered attention sessions",
+    "  Option+`      Jump back to previous pane",
     "",
     `Config location: ${getConfigDir()}/settings.json`,
     "Common settings:",
@@ -523,6 +548,14 @@ async function requireDaemonSnapshot(): Promise<AgentSession[]> {
   return agents;
 }
 
+async function loadSessionRegistry(): Promise<
+  Map<string, import("./scanner/session-registry.js").SessionRegistryRecord>
+> {
+  const registry = new Map<string, import("./scanner/session-registry.js").SessionRegistryRecord>();
+  await loadRegistryFromFile(join(getConfigDir(), "session-registry.json"), registry);
+  return registry;
+}
+
 program
   .option("--statusline", "One-line summary for tmux statusbar")
   .option(
@@ -736,7 +769,10 @@ program
 
     let agents: AgentSession[];
     try {
-      agents = await scanAgents(config, { enrichmentMode: "full" });
+      agents = await scanAgents(config, {
+        enrichmentMode: "full",
+        sessionRegistry: await loadSessionRegistry(),
+      });
     } catch (error) {
       const payload = {
         found: false,
@@ -779,10 +815,27 @@ program
       sessionLastActivityAt = gemini.lastActivityAt;
       sessionLastResponseAt = gemini.lastResponseAt;
     } else if (agent.agentName === "Codex") {
-      const codexSessions = await indexCodexSessions(config);
-      const matched = matchCodexSession(agent.cwd, agent.startedAt, codexSessions);
+      const { loadCodexBindingRegistryFromFile, selectCodexBindingSession, buildCodexBindingKey } =
+        await import("./scanner/codex-binding-registry.js");
+      const { getConfigDir } = await import("./config/index.js");
+      const { join: pj } = await import("node:path");
+      const codexSessions = await indexCodexSessions(config, { activeCwds: [agent.cwd] });
+      const bindingRegistry = new Map();
+      await loadCodexBindingRegistryFromFile(
+        pj(getConfigDir(), "codex-binding-registry.json"),
+        bindingRegistry,
+      );
+      const matched =
+        selectCodexBindingSession(
+          bindingRegistry,
+          agent.pid,
+          agent.processStartedAt,
+          agent.cwd,
+          codexSessions,
+        ) ?? matchCodexSession(agent.cwd, agent.processStartedAt, codexSessions);
       sessionPhase = await detectCodexPhase(matched?.filePath, config);
       sessionSourceFile = matched?.filePath;
+      sessionLastActivityAt = matched?.lastActivityAt;
     } else if (agent.agentName === "Claude Code" && agent.sessionId) {
       const phaseResult = await detectClaudePhase(
         agent.sessionId,
@@ -817,7 +870,33 @@ program
           }
         : null,
       paneOutput: paneOutput?.trimEnd() ?? null,
+      codexBinding: null as null | Record<string, unknown>,
     };
+
+    // Codex binding diagnostics
+    if (agent.agentName === "Codex") {
+      const { loadCodexBindingRegistryFromFile, buildCodexBindingKey } = await import(
+        "./scanner/codex-binding-registry.js"
+      );
+      const { getConfigDir } = await import("./config/index.js");
+      const { join: pj } = await import("node:path");
+      const bindingRegistry = new Map();
+      await loadCodexBindingRegistryFromFile(
+        pj(getConfigDir(), "codex-binding-registry.json"),
+        bindingRegistry,
+      );
+      const binding = bindingRegistry.get(buildCodexBindingKey(agent.pid, agent.processStartedAt));
+      if (binding) {
+        payload.codexBinding = {
+          threadId: binding.threadId,
+          rolloutPath: binding.rolloutPath,
+          confidence: binding.confidence,
+          unstableCount: binding.unstableCount,
+          lastVerifiedAt: binding.lastVerifiedAt,
+          deadAt: binding.deadAt ?? null,
+        };
+      }
+    }
 
     if (opts.json) {
       console.log(JSON.stringify(payload, null, 2));
@@ -836,6 +915,13 @@ program
     console.log(
       `tmux target: ${payload.tmuxTarget ? `${payload.tmuxTarget.pane} (${payload.tmuxTarget.match})` : "(none)"}`,
     );
+    if (payload.codexBinding) {
+      const b = payload.codexBinding;
+      console.log(
+        `Codex binding: thread=${b.threadId} confidence=${b.confidence} unstable=${b.unstableCount}`,
+      );
+      console.log(`  rollout: ${b.rolloutPath}`);
+    }
     console.log("Pane capture:");
     console.log(payload.paneOutput ?? "(none)");
   });
@@ -1039,6 +1125,104 @@ program
   });
 
 program
+  .command("activity")
+  .description("Show recent tool usage and token activity per session")
+  .option("--pid <pid>", "Filter by AI process PID")
+  .option("--session <sid>", "Filter by session ID (prefix match)")
+  .option("--days <n>", "Number of days to show", "1")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { getConfigDir } = await import("./config/index.js");
+    const { join: pj } = await import("node:path");
+    const { getRecentDateKeys, readActivityLog } = await import("./scanner/activity-log.js");
+
+    const logDir = pj(getConfigDir(), "activity-log");
+    const days = Math.max(1, Math.min(90, Number(opts.days) || 1));
+    const allEntries = [];
+
+    for (const dateStr of getRecentDateKeys(days)) {
+      const entries = await readActivityLog(logDir, dateStr);
+      allEntries.push(...entries);
+    }
+
+    // Filter
+    let filtered = allEntries;
+    if (opts.pid) {
+      const agents = await getAgentsSnapshot();
+      const agent = agents.find((a) => a.pid === Number(opts.pid));
+      if (agent?.sessionId) {
+        const sidPrefix = agent.sessionId.slice(0, 12);
+        filtered = filtered.filter((e) => e.sid.startsWith(sidPrefix));
+      } else {
+        filtered = [];
+      }
+    }
+    if (opts.session) {
+      const prefix = opts.session;
+      filtered = filtered.filter((e) => e.sid.startsWith(prefix));
+    }
+
+    if (opts.json) {
+      console.log(JSON.stringify(filtered, null, 2));
+      return;
+    }
+
+    if (filtered.length === 0) {
+      console.log("No activity found.");
+      return;
+    }
+
+    // Group by session
+    const bySession = new Map();
+    for (const e of filtered) {
+      const key = `${e.sid}|${e.agent}|${e.cwd}`;
+      if (!bySession.has(key)) bySession.set(key, []);
+      bySession.get(key).push(e);
+    }
+
+    for (const [key, entries] of bySession) {
+      const [sid, agent, cwd] = key.split("|");
+      const totalOut = entries.reduce(
+        (sum: number, e: Record<string, unknown>) =>
+          sum + ((e.tokens as Record<string, number>)?.out ?? 0),
+        0,
+      );
+      const totalCache = entries.reduce(
+        (sum: number, e: Record<string, unknown>) =>
+          sum + ((e.tokens as Record<string, number>)?.cache ?? 0),
+        0,
+      );
+      console.log(`\n${agent}  ${sid}...  ${cwd}`);
+      console.log(
+        `  ${entries.length} actions  out:${formatTokensShort(totalOut)}  cache:${formatTokensShort(totalCache)}`,
+      );
+      console.log("  ─────────────────────────────────────");
+      for (const e of entries.slice(-20)) {
+        const t = new Date(e.ts * 1000).toLocaleTimeString("en-GB", {
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        console.log(`  ${t}  ${e.tool}: ${truncateForDisplay(e.target, 60)}`);
+      }
+      if (entries.length > 20) {
+        console.log(`  ... +${entries.length - 20} more`);
+      }
+    }
+  });
+
+function formatTokensShort(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function truncateForDisplay(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  if (maxLength <= 3) return value.slice(0, maxLength);
+  return `${value.slice(0, maxLength - 3)}...`;
+}
+
+program
   .command("clean")
   .description("Show or terminate unmatched processes")
   .option("--config <path>", "Path to settings.json")
@@ -1047,7 +1231,7 @@ program
   .option("--pid <pid...>", "Only include specific unmatched PID(s)")
   .action(async (opts) => {
     const config = await loadConfig(resolveConfigPath(opts));
-    const agents = await scanAgents(config);
+    const agents = await scanAgents(config, { sessionRegistry: await loadSessionRegistry() });
     const selectedPids = Array.isArray(opts.pid)
       ? opts.pid
           .map((value: string) => Number.parseInt(value, 10))

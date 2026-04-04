@@ -4,7 +4,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { indexCodexSessionsFromSqlite } from "../dist/scanner/codex-sqlite.js";
+import {
+  buildCodexThreadsQuery,
+  indexCodexSessionsFromSqlite,
+} from "../dist/scanner/codex-sqlite.js";
 
 describe("codex sqlite indexing", () => {
   it("indexes active threads from sqlite", async () => {
@@ -88,6 +91,57 @@ describe("codex sqlite indexing", () => {
       assert.equal(sessions.length, 1);
       assert.ok(sessions[0].totalTokenUsage);
       assert.equal(sessions[0].totalTokenUsage.total_tokens, 500000);
+    } finally {
+      await rm(dir, { recursive: true });
+    }
+  });
+
+  it("builds a query with updated_at gating and cwd exceptions", () => {
+    const query = buildCodexThreadsQuery({
+      recentUpdatedAfter: 1775000000,
+      includeCwds: ["/tmp/active", "/tmp/active"],
+    });
+
+    assert.match(query, /updated_at >= 1775000000/);
+    assert.match(query, /cwd IN \('\/tmp\/active'\)/);
+    assert.match(query, /archived = 0/);
+  });
+
+  it("keeps active cwd rows even when older than the recent cutoff", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "marmonitor-codex-sqlite-"));
+    const dbPath = join(dir, "state.sqlite");
+    try {
+      execSync(`sqlite3 "${dbPath}" "
+        CREATE TABLE threads (
+          id TEXT PRIMARY KEY,
+          rollout_path TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          source TEXT NOT NULL DEFAULT 'cli',
+          model_provider TEXT NOT NULL DEFAULT 'openai',
+          cwd TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          sandbox_policy TEXT NOT NULL DEFAULT '{}',
+          approval_mode TEXT NOT NULL DEFAULT 'on-request',
+          tokens_used INTEGER NOT NULL DEFAULT 0,
+          archived INTEGER NOT NULL DEFAULT 0,
+          model TEXT,
+          cli_version TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO threads (id, rollout_path, created_at, updated_at, cwd, tokens_used, archived, model)
+        VALUES ('recent', '/tmp/recent.jsonl', 1774000000, 1776000000, '/projects/recent', 10, 0, 'gpt-5.4');
+        INSERT INTO threads (id, rollout_path, created_at, updated_at, cwd, tokens_used, archived, model)
+        VALUES ('old-active', '/tmp/old.jsonl', 1773000000, 1773000000, '/projects/active', 20, 0, 'gpt-5.4');
+        INSERT INTO threads (id, rollout_path, created_at, updated_at, cwd, tokens_used, archived, model)
+        VALUES ('old-cold', '/tmp/cold.jsonl', 1772000000, 1772000000, '/projects/cold', 30, 0, 'gpt-5.4');
+      "`);
+
+      const sessions = await indexCodexSessionsFromSqlite(dbPath, {
+        recentUpdatedAfter: 1775000000,
+        includeCwds: ["/projects/active"],
+      });
+
+      assert.deepEqual(sessions.map((session) => session.id).sort(), ["old-active", "recent"]);
     } finally {
       await rm(dir, { recursive: true });
     }

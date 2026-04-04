@@ -125,12 +125,20 @@ export function determineStatus(
   stalledAfterMin: number,
   phase?: SessionPhase,
   recentActivityActiveSec = 180,
+  agentName?: string,
 ): "Active" | "Idle" | "Stalled" | "Unmatched" | "Dead" {
   if (!sessionMatched) return "Unmatched";
   if (cpuPercent > activeCpuThreshold) return "Active";
   if (
     (phase === "thinking" || phase === "tool" || phase === "permission") &&
     (elapsedSec === undefined || elapsedSec <= recentActivityActiveSec)
+  ) {
+    return "Active";
+  }
+  if (
+    agentName === "Codex" &&
+    elapsedSec !== undefined &&
+    elapsedSec <= Math.min(60, recentActivityActiveSec)
   ) {
     return "Active";
   }
@@ -473,10 +481,13 @@ export function buildAttentionItems(
   agents: AgentSession[],
   nowSec = Date.now() / 1000,
 ): AttentionItem[] {
-  const alive = agents.filter(
-    (agent) =>
-      agent.status !== "Dead" && agent.status !== "Unmatched" && agent.status !== "Stalled",
-  );
+  const alive = agents.filter((agent) => {
+    const kind = attentionKind(agent);
+    if (kind === "permission" || kind === "thinking" || kind === "tool") {
+      return true;
+    }
+    return agent.status !== "Dead" && agent.status !== "Unmatched" && agent.status !== "Stalled";
+  });
 
   const toAttentionItem = (
     agent: AgentSession,
