@@ -63,6 +63,7 @@ const msg = `
   Commands:
     $ marmonitor status           Show all AI sessions
     $ marmonitor attention        Sessions needing your input
+    $ marmonitor activity         What did each session do?
     $ marmonitor help             All commands and shortcuts
 
   Uninstall:
