@@ -535,50 +535,6 @@ const DAEMON_PID_PATH = join(DAEMON_DIR, "daemon.pid");
 const DAEMON_SNAPSHOT_PATH = join(DAEMON_DIR, "daemon-snapshot.json");
 const DAEMON_NOT_RUNNING = "Daemon not running. Run: marmonitor start";
 
-function buildPaneContext(
-  agents: AgentSession[],
-  panePid: number,
-  panePath?: string,
-): string | undefined {
-  if (!panePid || Number.isNaN(panePid)) return undefined;
-
-  // Match pane PID to AI session via process tree (ppid chain)
-  const matched = agents.find(
-    (a) => a.pid === panePid || a.ppid === panePid || a.workers?.some((w) => w.pid === panePid),
-  );
-
-  // Build path + branch from pane path or matched session
-  const cwd = panePath ?? matched?.cwd;
-  if (!cwd) return undefined;
-
-  const home = process.env.HOME ?? "";
-  const shortPath = cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
-  const project = shortPath.split("/").pop() ?? shortPath;
-  const branch = matched?.branch ?? "";
-  const branchTag = branch ? ` (${branch})` : "";
-
-  // AI session info
-  const sessionInfo = matched
-    ? (() => {
-        const agent =
-          matched.agentName === "Claude Code" ? "Cl" : matched.agentName === "Codex" ? "Cx" : "Gm";
-        const phase =
-          matched.phase === "permission"
-            ? "⏳"
-            : matched.phase === "thinking"
-              ? "🤔"
-              : matched.phase === "tool"
-                ? "🔧"
-                : matched.phase === "done"
-                  ? "✅"
-                  : "";
-        return `#[fg=#6c7086] ${agent}${phase}#[default]`;
-      })()
-    : "";
-
-  return `#[fg=#6c7086]${project}${branchTag}${sessionInfo} #[default]`;
-}
-
 async function getAgentsSnapshot(): Promise<AgentSession[]> {
   return (await readDaemonSnapshot(DAEMON_SNAPSHOT_PATH, 5_000)) as AgentSession[];
 }
@@ -608,8 +564,6 @@ program
     "compact",
   )
   .option("--width <n>", "Render width hint for responsive statusline compaction")
-  .option("--pane-pid <pid>", "Current tmux pane PID for right-side context")
-  .option("--pane-path <path>", "Current tmux pane working directory")
   .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
     const validFormats = ["compact", "standard", "extended", "tmux-badges", "wezterm-pills"];
@@ -662,16 +616,8 @@ program
           config.integration.tmux.badgeStyle,
           hasJumpAnchor,
         );
-        // Append right-aligned pane context for tmux-badges
-        let output = rendered;
-        if (opts.statuslineFormat === "tmux-badges" && opts.panePid) {
-          const paneContext = buildPaneContext(agents, Number(opts.panePid), opts.panePath);
-          if (paneContext) {
-            output = `${rendered}#[align=right]${paneContext}`;
-          }
-        }
-        await writeCachedStatusline(opts.statuslineFormat, attentionLimit, width, output);
-        console.log(output);
+        await writeCachedStatusline(opts.statuslineFormat, attentionLimit, width, rendered);
+        console.log(rendered);
         return;
       } catch {
         console.log(renderUnavailableStatusline(opts.statuslineFormat));
