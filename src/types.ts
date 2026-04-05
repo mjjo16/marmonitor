@@ -45,6 +45,7 @@ export interface AgentSession {
   lastResponseAt?: number; // epoch seconds — last AI response
   lastActivityAt?: number; // epoch seconds — last any event
   runtimeSource?: RuntimeSource;
+  branch?: string; // git branch from .git/HEAD
 }
 
 /** Agent detection signature */
