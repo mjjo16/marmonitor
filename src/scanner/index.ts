@@ -317,6 +317,18 @@ export async function scanAgents(
       agentName,
     );
 
+    // Read git branch from .git/HEAD (full enrichment only, ~0.1ms per session)
+    let branch: string | undefined = cachedEnrichment?.branch;
+    if (isFullEnrichment && cwd !== "unknown") {
+      try {
+        const headContent = await readFile(join(cwd, ".git", "HEAD"), "utf-8");
+        const trimmed = headContent.trim();
+        branch = trimmed.startsWith("ref: refs/heads/") ? trimmed.slice(16) : undefined;
+      } catch {
+        branch = undefined;
+      }
+    }
+
     const session = {
       agentName,
       pid: proc.pid,
@@ -335,6 +347,7 @@ export async function scanAgents(
       lastResponseAt,
       lastActivityAt,
       runtimeSource,
+      branch,
     } as AgentSession;
 
     if (isFullEnrichment) {
@@ -351,6 +364,7 @@ export async function scanAgents(
         lastResponseAt: session.lastResponseAt,
         lastActivityAt: session.lastActivityAt,
         runtimeSource: session.runtimeSource,
+        branch: session.branch,
       });
     }
 
