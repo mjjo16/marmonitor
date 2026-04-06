@@ -1117,6 +1117,8 @@ program
   .option("--pid <pid>", "Filter by AI process PID")
   .option("--session <sid>", "Filter by session ID (prefix match)")
   .option("--days <n>", "Number of days to show", "1")
+  .option("--lines <n>", "Max activity lines per session (default 30, max 200)", "30")
+  .option("--order <dir>", "Sort order: desc (newest first) or asc (oldest first)", "desc")
   .option("--json", "Output as JSON")
   .action(async (opts) => {
     const { getConfigDir } = await import("./config/index.js");
@@ -1125,6 +1127,8 @@ program
 
     const logDir = pj(getConfigDir(), "activity-log");
     const days = Math.max(1, Math.min(90, Number(opts.days) || 1));
+    const maxLines = Math.max(1, Math.min(200, Number(opts.lines) || 30));
+    const descOrder = opts.order !== "asc";
     const allEntries = [];
 
     for (const dateStr of getRecentDateKeys(days)) {
@@ -1134,13 +1138,25 @@ program
 
     // Filter
     let filtered = allEntries;
+    let pidFilterAgent:
+      | { agentName: string; pid: number; cwd: string; sessionId: string }
+      | undefined;
     if (opts.pid) {
       const agents = await getAgentsSnapshot();
       const agent = agents.find((a) => a.pid === Number(opts.pid));
       if (agent?.sessionId) {
+        pidFilterAgent = {
+          agentName: agent.agentName,
+          pid: agent.pid,
+          cwd: agent.cwd,
+          sessionId: agent.sessionId,
+        };
         const sidPrefix = agent.sessionId.slice(0, 12);
         filtered = filtered.filter((e) => e.sid.startsWith(sidPrefix));
       } else {
+        pidFilterAgent = agent
+          ? { agentName: agent.agentName, pid: agent.pid, cwd: agent.cwd, sessionId: "" }
+          : undefined;
         filtered = [];
       }
     }
@@ -1150,12 +1166,25 @@ program
     }
 
     if (opts.json) {
+      if (descOrder) filtered.reverse();
       console.log(JSON.stringify(filtered, null, 2));
       return;
     }
 
     if (filtered.length === 0) {
-      console.log("No activity found.");
+      if (pidFilterAgent) {
+        console.log(`No activity found for PID ${pidFilterAgent.pid}.`);
+        console.log(`  Agent: ${pidFilterAgent.agentName}`);
+        console.log(`  CWD:   ${pidFilterAgent.cwd}`);
+        if (pidFilterAgent.sessionId) {
+          console.log(`  SID:   ${pidFilterAgent.sessionId.slice(0, 12)}...`);
+        } else {
+          console.log("  SID:   (no session matched — activity logging may not have started)");
+        }
+        console.log(`\n  Activity log checked: last ${days} day(s) in ${logDir}`);
+      } else {
+        console.log("No activity found.");
+      }
       return;
     }
 
@@ -1184,15 +1213,17 @@ program
         `  ${entries.length} actions  out:${formatTokensShort(totalOut)}  cache:${formatTokensShort(totalCache)}`,
       );
       console.log("  ─────────────────────────────────────");
-      for (const e of entries.slice(-20)) {
+      const sorted = descOrder ? [...entries].reverse() : entries;
+      const shown = sorted.slice(0, maxLines);
+      for (const e of shown) {
         const t = new Date(e.ts * 1000).toLocaleTimeString("en-GB", {
           hour: "2-digit",
           minute: "2-digit",
         });
         console.log(`  ${t}  ${e.tool}: ${truncateForDisplay(e.target, 60)}`);
       }
-      if (entries.length > 20) {
-        console.log(`  ... +${entries.length - 20} more`);
+      if (entries.length > maxLines) {
+        console.log(`  ... +${entries.length - maxLines} more (use --lines to show more)`);
       }
     }
   });
