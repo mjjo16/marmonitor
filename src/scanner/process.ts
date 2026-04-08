@@ -87,11 +87,18 @@ export function matchesProcessCommand(command: string, processName: string): boo
   return new RegExp(`(?:^|[/\\\\])${escaped}(?:\\s|$)`, "i").test(command);
 }
 
+/** Electron sub-process flags that indicate a desktop GUI helper, not a CLI agent. */
+const ELECTRON_TYPE_RE = /--type=(utility|renderer|gpu-process|zygote|broker)/;
+
 /** Match a process against agent signatures using process name first, then cmd fallback. */
 export function detectAgentFromProcessSignature(
   proc: { name: string; cmd?: string },
   config: MarmonitorConfig,
 ): string | null {
+  // Skip Electron sub-processes (renderer, utility, gpu, zygote) to avoid
+  // false-positive detection of desktop apps (e.g. Claude Desktop) as CLI agents.
+  if (proc.cmd && ELECTRON_TYPE_RE.test(proc.cmd)) return null;
+
   const name = proc.name.toLowerCase();
   const command = (proc.cmd ?? "").toLowerCase();
   for (const [agentName, agentConfig] of Object.entries(config.agents)) {

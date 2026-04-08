@@ -48,7 +48,8 @@ let monoMode = false;
 
 /** Apply badge style to terminal chalk output: mono uses bold/dim only */
 export function applyTerminalStyle(badgeStyle: BadgeStyle): void {
-  monoMode = badgeStyle === "basic-mono" || badgeStyle === "text-mono";
+  monoMode =
+    badgeStyle === "basic-mono" || badgeStyle === "block-mono" || badgeStyle === "text-mono";
 }
 
 export function abbreviateModel(model: string | undefined): string {

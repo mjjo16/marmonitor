@@ -35,6 +35,20 @@ export const BADGE_THEMES: Record<string, BadgeTheme> = {
     jumpBack:
       "#[fg=#313244,bg=#1e1e2e]#[fg=#6c7086,bg=#313244] ↩ #[fg=#313244,bg=#1e1e2e]#[default]",
   },
+  block: {
+    badge: "#[bold,fg={fg},bg={bg}] {label} #[default]",
+    attention: "#[bold,fg=#11111b,bg={bg}] {index} #[fg=#cdd6f4,bg=#313244] {label} #[default]",
+    focus: "#[fg=#bac2de,bg=#181825] {text} #[default]",
+    empty: "#[fg=#cdd6f4,bg=#313244] no active #[default]",
+    jumpBack: "#[fg=#bac2de,bg=#45475a] ↩ #[default]",
+  },
+  "block-mono": {
+    badge: "#[bold,fg=#cdd6f4,bg=#313244] {label} #[default]",
+    attention: "#[bold,fg=#cdd6f4,bg=#313244] {index} #[fg=#6c7086,bg=#1e1e2e] {label} #[default]",
+    focus: "#[fg=#6c7086,bg=#181825] {text} #[default]",
+    empty: "#[fg=#6c7086,bg=#313244] no active #[default]",
+    jumpBack: "#[fg=#6c7086,bg=#313244] ↩ #[default]",
+  },
   text: {
     badge: "#[fg={bg}]{label}#[default]",
     attention: "#[fg={bg}]{index} {label}#[default]",
