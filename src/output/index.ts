@@ -51,6 +51,16 @@ export function applyTerminalStyle(badgeStyle: BadgeStyle): void {
   monoMode = badgeStyle === "basic-mono" || badgeStyle === "text-mono";
 }
 
+function abbreviateModel(model: string | undefined): string {
+  if (!model) return "—";
+  if (model.includes("opus")) return "opus";
+  if (model.includes("sonnet")) return "sonnet";
+  if (model.includes("haiku")) return "haiku";
+  // For non-Claude models, strip version suffix if too long (e.g. gpt-4o-mini → gpt-4o)
+  if (model.length <= 8) return model;
+  return model.slice(0, 7);
+}
+
 function cwdToProjectName(cwd: string): string {
   const home = process.env.HOME ?? "";
   const short = cwd.startsWith(home) ? cwd.slice(home.length + 1) : cwd;
@@ -217,6 +227,7 @@ export async function printStatus(agents: AgentSession[]): Promise<void> {
     const W = {
       status: 10,
       agent: 7,
+      model: 8,
       pid: 6,
       cpu: 6,
       mem: 7,
@@ -230,6 +241,7 @@ export async function printStatus(agents: AgentSession[]): Promise<void> {
     const cols = [
       "Status".padEnd(W.status),
       "Agent".padEnd(W.agent),
+      "Model".padEnd(W.model),
       "PID".padEnd(W.pid),
       "CPU".padEnd(W.cpu),
       "MEM".padEnd(W.mem),
@@ -268,6 +280,7 @@ export async function printStatus(agents: AgentSession[]): Promise<void> {
                     : chalk.white(statusLabel2);
       const rawStatus = coloredLabel + " ".repeat(Math.max(0, W.status - statusLabel2.length));
       const agentStr = a.agentName === "Claude Code" ? "Claude" : a.agentName;
+      const modelStr = abbreviateModel(a.model);
       const cpu = `${a.cpuPercent}%`;
       const mem = `${a.memoryMb.toFixed(0)}MB`;
       const last = a.lastResponseAt
@@ -282,6 +295,7 @@ export async function printStatus(agents: AgentSession[]): Promise<void> {
       const line = [
         rawStatus,
         padVisible(agentStr, W.agent),
+        chalk.dim(modelStr.padEnd(W.model)),
         String(a.pid).padEnd(W.pid),
         padVisibleRight(cpu, W.cpu),
         padVisibleRight(mem, W.mem),
@@ -297,6 +311,7 @@ export async function printStatus(agents: AgentSession[]): Promise<void> {
           const wLine = [
             " ".repeat(W.status),
             "└─".padEnd(W.agent),
+            " ".repeat(W.model),
             String(w.pid).padEnd(W.pid),
             padVisibleRight(`${w.cpuPercent}%`, W.cpu),
             padVisibleRight(`${w.memoryMb.toFixed(0)}MB`, W.mem),
