@@ -71,7 +71,7 @@ export interface MarmonitorConfig {
         dockToggle: string;
         directJump: string[];
       };
-      badgeStyle: "basic" | "basic-mono" | "text" | "text-mono";
+      badgeStyle: "basic" | "basic-mono" | "block" | "block-mono" | "text" | "text-mono";
     };
     wezterm: {
       enabled: boolean;

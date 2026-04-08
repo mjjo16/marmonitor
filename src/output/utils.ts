@@ -769,7 +769,7 @@ export function buildStatuslineSummary(
   return standardParts.join(" | ");
 }
 
-export type BadgeStyle = "basic" | "basic-mono" | "text" | "text-mono";
+export type BadgeStyle = "basic" | "basic-mono" | "block" | "block-mono" | "text" | "text-mono";
 
 function attentionBg(kind: Exclude<AttentionKind, "unmatched">): string {
   if (kind === "permission") return "#f38ba8";
