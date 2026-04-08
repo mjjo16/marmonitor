@@ -2,6 +2,29 @@
 
 All notable changes to marmonitor are documented here.
 
+## [0.2.4] - 2026-04-08
+
+### Added
+- **Git branch context** in status and attention views for enriched sessions.
+- **Current pane context** on the right side of the tmux statusline.
+- **Status table model column** with abbreviated Claude model names and improved worker row alignment.
+- **Activity CLI improvements**: default descending order, `--order`, `--lines`, and better `--pid` guidance when no entries exist.
+- **Block badge styles**: `block` and `block-mono` badge themes without Powerline glyph separators for terminals/fonts that render Nerd Font arrows poorly.
+
+### Fixed
+- Claude Desktop Electron helper processes on Linux are no longer misdetected as Claude Code CLI sessions.
+- Claude Code activity logging now resolves the correct session file path.
+
+## [0.2.3] - 2026-04-04
+
+### Added
+- **Codex PID-to-thread binding registry** for more stable long-lived session mapping.
+- **Session activity log** and CLI views for tool usage and token tracking.
+
+### Fixed
+- Codex binding key mismatch between foreground and daemon paths.
+- Session continuity and activity freshness stabilization across scans.
+
 ## [0.2.2] - 2026-04-03
 
 ### Added

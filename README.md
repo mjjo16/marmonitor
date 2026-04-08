@@ -221,6 +221,8 @@ tmux badges and terminal text output can share one style via `integration.tmux.b
 
 - `basic` — default colored pills
 - `basic-mono` — monochrome pills with Powerline borders
+- `block` — filled background badges without Powerline separator glyphs
+- `block-mono` — monochrome filled badges without Powerline separator glyphs
 - `text` — plain colored text, no filled background
 - `text-mono` — grayscale text only
 

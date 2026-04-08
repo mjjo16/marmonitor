@@ -48,7 +48,56 @@ let monoMode = false;
 
 /** Apply badge style to terminal chalk output: mono uses bold/dim only */
 export function applyTerminalStyle(badgeStyle: BadgeStyle): void {
-  monoMode = badgeStyle === "basic-mono" || badgeStyle === "text-mono";
+  monoMode =
+    badgeStyle === "basic-mono" || badgeStyle === "block-mono" || badgeStyle === "text-mono";
+}
+
+export function abbreviateModel(model: string | undefined): string {
+  if (!model) return "—";
+  if (model.includes("opus")) return "opus";
+  if (model.includes("sonnet")) return "sonnet";
+  if (model.includes("haiku")) return "haiku";
+  if (model.length <= 12) return model;
+  return model.slice(0, 11);
+}
+
+function cwdToProjectName(cwd: string): string {
+  const home = process.env.HOME ?? "";
+  const short = cwd.startsWith(home) ? cwd.slice(home.length + 1) : cwd;
+  const parts = short.split("/");
+  return parts[parts.length - 1] || short;
+}
+
+/** Strip ANSI escape codes to get visible character count */
+function visibleLength(str: string): number {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape stripping
+  return str.replace(/\x1b\[\d*(;\d+)*m/g, "").length;
+}
+
+/** Pad string to fixed visible width (ANSI-aware) */
+function padVisible(str: string, width: number): string {
+  const visible = visibleLength(str);
+  return visible >= width ? str : str + " ".repeat(width - visible);
+}
+
+/** Right-align a string to fixed width (for numbers like CPU, MEM) */
+function padVisibleRight(str: string, width: number): string {
+  const visible = visibleLength(str);
+  return visible >= width ? str : " ".repeat(width - visible) + str;
+}
+
+function formatTokensCompact(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function formatElapsedCompactTable(epochSec: number): string {
+  const sec = Math.floor(Date.now() / 1000 - epochSec);
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
+  return `${Math.floor(sec / 86400)}d`;
 }
 
 /** Agent name with distinct color */
@@ -172,36 +221,102 @@ export async function printStatus(agents: AgentSession[]): Promise<void> {
   }
 
   if (alive.length > 0) {
-    console.log(`AI Sessions (${alive.length} active):`);
+    console.log(`AI Sessions (${alive.length} active):\n`);
+
+    // Column widths — fixed-width columns first, variable-width last
+    const W = {
+      status: 10,
+      agent: 7,
+      model: 12,
+      pid: 6,
+      cpu: 6,
+      mem: 7,
+      last: 6,
+      tokens: 10,
+      project: 22,
+      branch: 16,
+    };
+
+    // Table header
+    const cols = [
+      "Status".padEnd(W.status),
+      "Agent".padEnd(W.agent),
+      "Model".padEnd(W.model),
+      "PID".padEnd(W.pid),
+      "CPU".padEnd(W.cpu),
+      "MEM".padEnd(W.mem),
+      "Last".padEnd(W.last),
+      "Tokens".padEnd(W.tokens),
+      "Project".padEnd(W.project),
+      "Branch",
+    ];
+    console.log(`  ${chalk.dim(cols.join(" "))}`);
+    console.log(chalk.dim(`  ${"─".repeat(cols.join(" ").length)}`));
+
     for (const a of alive) {
-      const icon = displayStatusLabel(a.status, a.phase);
-      const path = shortenPath(a.cwd);
-      const started = formatElapsed(a.startedAt);
-      const tokens = formatTokenUsage(a.tokenUsage, a.model);
-      const agent = agentLabel(a.agentName).padEnd(18);
-      const phase = phaseIcon(a.phase);
-      const runtime = runtimeLabel(a.runtimeSource);
-      const lastTime = a.lastResponseAt
-        ? chalk.dim(`  last response ${formatElapsed(a.lastResponseAt)}`)
+      // Fixed-width status: colorize label only, pad with plain spaces after
+      const statusWord =
+        a.phase === "permission"
+          ? "Allow"
+          : a.phase === "thinking"
+            ? "Think"
+            : a.phase === "tool"
+              ? "Tool"
+              : a.status;
+      const statusLabel2 = `[${statusWord}]`;
+      const coloredLabel =
+        statusWord === "Active"
+          ? chalk.green(statusLabel2)
+          : statusWord === "Idle"
+            ? chalk.yellow(statusLabel2)
+            : statusWord === "Stalled"
+              ? chalk.red(statusLabel2)
+              : statusWord === "Allow"
+                ? chalk.red(statusLabel2)
+                : statusWord === "Think"
+                  ? chalk.magenta(statusLabel2)
+                  : statusWord === "Tool"
+                    ? chalk.green(statusLabel2)
+                    : chalk.white(statusLabel2);
+      const rawStatus = coloredLabel + " ".repeat(Math.max(0, W.status - statusLabel2.length));
+      const agentStr = a.agentName === "Claude Code" ? "Claude" : a.agentName;
+      const modelStr = abbreviateModel(a.model);
+      const cpu = `${a.cpuPercent}%`;
+      const mem = `${a.memoryMb.toFixed(0)}MB`;
+      const last = a.lastResponseAt
+        ? formatElapsedCompactTable(a.lastResponseAt)
         : a.lastActivityAt
-          ? chalk.dim(`  last activity ${formatElapsed(a.lastActivityAt)}`)
-          : "";
-      console.log(`  ${icon}  ${agent} PID:${String(a.pid).padEnd(6)} ${path}${runtime}${phase}`);
-      console.log(
-        `           CPU:${a.cpuPercent}%  MEM:${a.memoryMb.toFixed(0)}MB  started ${started}${lastTime}${tokens}`,
-      );
+          ? formatElapsedCompactTable(a.lastActivityAt)
+          : "—";
+      const tokens = a.tokenUsage ? `out:${formatTokensCompact(a.tokenUsage.outputTokens)}` : "";
+      const project = cwdToProjectName(a.cwd).slice(0, W.project - 1);
+      const branchStr = (a.branch ?? "—").slice(0, W.branch - 1);
+
+      const line = [
+        rawStatus,
+        padVisible(agentStr, W.agent),
+        chalk.dim(modelStr.padEnd(W.model)),
+        String(a.pid).padEnd(W.pid),
+        padVisibleRight(cpu, W.cpu),
+        padVisibleRight(mem, W.mem),
+        chalk.dim(last.padStart(W.last)),
+        chalk.dim(tokens.padEnd(W.tokens)),
+        project.padEnd(W.project),
+        chalk.dim(branchStr),
+      ].join(" ");
+      console.log(`  ${line}`);
 
       if (a.workers && a.workers.length > 0) {
-        for (let i = 0; i < a.workers.length; i++) {
-          const w = a.workers[i];
-          const isLast = i === a.workers.length - 1;
-          const branch = isLast ? "└──" : "├──";
-          const wStatus = statusLabel(w.status).trim();
-          console.log(
-            chalk.dim(
-              `           ${branch} PID:${String(w.pid).padEnd(6)} CPU:${w.cpuPercent}%  MEM:${w.memoryMb.toFixed(0)}MB  ${wStatus}`,
-            ),
-          );
+        for (const w of a.workers) {
+          const wLine = [
+            " ".repeat(W.status),
+            "└─".padEnd(W.agent),
+            " ".repeat(W.model),
+            String(w.pid).padEnd(W.pid),
+            padVisibleRight(`${w.cpuPercent}%`, W.cpu),
+            padVisibleRight(`${w.memoryMb.toFixed(0)}MB`, W.mem),
+          ].join(" ");
+          console.log(chalk.dim(`  ${wLine}`));
         }
       }
     }
@@ -306,6 +421,8 @@ function attentionKindLabel(kind: ReturnType<typeof buildAttentionItems>[number]
 function attentionLine(item: ReturnType<typeof buildAttentionItems>[number]): string {
   const name = item.agentName === "Claude Code" ? "Claude" : item.agentName;
   const path = compactDirLabel(item.cwd);
+  const branch = item.branch;
+  const branchTag = branch ? chalk.dim(` (${branch})`) : "";
   const runtime = runtimeLabel(item.runtimeSource);
   const time = item.lastResponseAt
     ? `  ${chalk.dim(formatElapsed(item.lastResponseAt))}`
@@ -314,21 +431,21 @@ function attentionLine(item: ReturnType<typeof buildAttentionItems>[number]): st
       : "";
 
   if (item.kind === "unmatched") {
-    return `${name}  ${chalk.dim(path)}${runtime}  PID:${item.pid}${time}`;
+    return `${name}  ${chalk.dim(path)}${branchTag}${runtime}  PID:${item.pid}${time}`;
   }
   if (item.kind === "permission") {
-    return `${name}  ${chalk.dim(path)}${runtime}  allow pending  PID:${item.pid}${time}`;
+    return `${name}  ${chalk.dim(path)}${branchTag}${runtime}  allow pending  PID:${item.pid}${time}`;
   }
   if (item.kind === "stalled") {
-    return `${name}  ${chalk.dim(path)}${runtime}  stalled  PID:${item.pid}${time}`;
+    return `${name}  ${chalk.dim(path)}${branchTag}${runtime}  stalled  PID:${item.pid}${time}`;
   }
   if (item.kind === "thinking") {
-    return `${name}  ${chalk.dim(path)}${runtime}  thinking  PID:${item.pid}${time}`;
+    return `${name}  ${chalk.dim(path)}${branchTag}${runtime}  thinking  PID:${item.pid}${time}`;
   }
   if (item.kind === "active") {
-    return `${name}  ${chalk.dim(path)}${runtime}  recent  PID:${item.pid}${time}`;
+    return `${name}  ${chalk.dim(path)}${branchTag}${runtime}  active  PID:${item.pid}${time}`;
   }
-  return `${name}  ${chalk.dim(path)}${runtime}  tool  PID:${item.pid}${time}`;
+  return `${name}  ${chalk.dim(path)}${branchTag}${runtime}  tool  PID:${item.pid}${time}`;
 }
 
 function jumpAttentionStatusLabel(
@@ -337,7 +454,7 @@ function jumpAttentionStatusLabel(
   if (item.kind === "permission") return chalk.red("[Allow]   ");
   if (item.kind === "thinking") return chalk.green("[Thinking]");
   if (item.kind === "tool") return chalk.cyan("[Tool]    ");
-  return chalk.blue("[Recent]  ");
+  return chalk.blue("[Active]  ");
 }
 
 function jumpAttentionPhaseIcon(item: ReturnType<typeof buildJumpAttentionItems>[number]): string {
@@ -350,6 +467,8 @@ function jumpAttentionPhaseIcon(item: ReturnType<typeof buildJumpAttentionItems>
 function jumpAttentionLine(item: ReturnType<typeof buildJumpAttentionItems>[number]): string {
   const name = item.agentName === "Claude Code" ? "Claude" : item.agentName;
   const path = compactDirLabel(item.cwd);
+  const branch = item.branch;
+  const branchTag = branch ? chalk.dim(` (${branch})`) : "";
   const runtime = runtimeLabel(item.runtimeSource);
   const started = item.startedAt ? chalk.dim(` started ${formatElapsed(item.startedAt)}`) : "";
   const activity = item.lastResponseAt
@@ -363,15 +482,15 @@ function jumpAttentionLine(item: ReturnType<typeof buildJumpAttentionItems>[numb
   const agent = agentLabel(item.agentName).padEnd(8);
 
   if (item.kind === "permission") {
-    return `  ${status} ${agent} ${chalk.dim(path)}${runtime}${icon}\n             PID:${item.pid}  ${stats}${started}${activity}`;
+    return `  ${status} ${agent} ${chalk.dim(path)}${branchTag}${runtime}${icon}\n             PID:${item.pid}  ${stats}${started}${activity}`;
   }
   if (item.kind === "thinking") {
-    return `  ${status} ${agent} ${chalk.dim(path)}${runtime}${icon}\n             PID:${item.pid}  ${stats}${started}${activity}`;
+    return `  ${status} ${agent} ${chalk.dim(path)}${branchTag}${runtime}${icon}\n             PID:${item.pid}  ${stats}${started}${activity}`;
   }
   if (item.kind === "tool") {
-    return `  ${status} ${agent} ${chalk.dim(path)}${runtime}${icon}\n             PID:${item.pid}  ${stats}${started}${activity}`;
+    return `  ${status} ${agent} ${chalk.dim(path)}${branchTag}${runtime}${icon}\n             PID:${item.pid}  ${stats}${started}${activity}`;
   }
-  return `  ${status} ${agent} ${chalk.dim(path)}${runtime}${icon}\n             PID:${item.pid}  ${stats}${started}${activity}`;
+  return `  ${status} ${agent} ${chalk.dim(path)}${branchTag}${runtime}${icon}\n             PID:${item.pid}  ${stats}${started}${activity}`;
 }
 
 function paginateJumpAttentionItems<T>(items: T[], page: number, pageSize = 10): T[] {

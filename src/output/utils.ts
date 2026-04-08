@@ -231,6 +231,7 @@ export interface AttentionItem {
   phase?: AgentSession["phase"];
   lastResponseAt?: number;
   lastActivityAt?: number;
+  branch?: string;
 }
 
 export interface StatusPill {
@@ -507,6 +508,7 @@ export function buildAttentionItems(
     phase: agent.phase,
     lastResponseAt: agent.lastResponseAt,
     lastActivityAt: agent.lastActivityAt,
+    branch: agent.branch,
   });
 
   const tier1 = alive
@@ -769,7 +771,7 @@ export function buildStatuslineSummary(
   return standardParts.join(" | ");
 }
 
-export type BadgeStyle = "basic" | "basic-mono" | "text" | "text-mono";
+export type BadgeStyle = "basic" | "basic-mono" | "block" | "block-mono" | "text" | "text-mono";
 
 function attentionBg(kind: Exclude<AttentionKind, "unmatched">): string {
   if (kind === "permission") return "#f38ba8";

@@ -39,6 +39,41 @@ describe("detectAgentFromProcessSignature", () => {
     );
   });
 
+  it("does not match Electron sub-processes from desktop apps", () => {
+    // Claude Desktop on Linux spawns Electron utility/renderer processes
+    // whose binary name is "claude" but are not Claude Code CLI sessions.
+    assert.equal(
+      detectAgentFromProcessSignature(
+        {
+          name: "claude",
+          cmd: "/proc/self/exe --type=utility --utility-sub-type=network.mojom.NetworkService --user-data-dir=/home/user/.config/Claude",
+        },
+        config,
+      ),
+      null,
+    );
+    assert.equal(
+      detectAgentFromProcessSignature(
+        {
+          name: "claude",
+          cmd: "/proc/self/exe --type=renderer --user-data-dir=/home/user/.config/Claude",
+        },
+        config,
+      ),
+      null,
+    );
+    assert.equal(
+      detectAgentFromProcessSignature(
+        {
+          name: "claude",
+          cmd: "/proc/self/exe --type=gpu-process --user-data-dir=/home/user/.config/Claude",
+        },
+        config,
+      ),
+      null,
+    );
+  });
+
   it("does not falsely match unrelated node processes", () => {
     assert.equal(
       detectAgentFromProcessSignature(

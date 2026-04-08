@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Claude Code, Codex, Gemini를 위한 tmux 상태바 모니터 — AI 코딩 세션을 실시간으로 추적하세요</strong>
+  <strong>Claude Code · Codex · Gemini용 tmux 상태바 모니터 — AI 코딩 세션을 실시간으로 추적하세요</strong>
 </p>
 
 <p align="center">
@@ -21,20 +21,20 @@
 
 ## 왜 marmonitor인가?
 
-tmux에서 여러 AI 코딩 에이전트를 동시에 실행하는 것은 이제 일상이 되었습니다 — Claude Code가 백엔드를 리팩토링하고, Codex가 다른 패널에서 테스트를 작성하고, Gemini가 문서를 검토합니다. 하지만 세션이 늘어날수록 같은 문제에 부딪힙니다:
+tmux에서 여러 AI 코딩 에이전트를 동시에 실행하는 건 이제 일상입니다 — Claude Code가 백엔드를 리팩토링하고, Codex가 다른 패널에서 테스트를 작성하고, Gemini가 문서를 검토합니다. 하지만 세션이 늘어날수록 같은 문제에 부딪힙니다:
 
 - 패널로 전환했더니 에이전트가 10분째 `allow` 승인을 기다리고 있었다
 - 방금 작업하던 Codex 세션이 어느 윈도우에 있는지 기억나지 않는다
 - 여러 세션에서 토큰을 얼마나 소모했는지 알 수 없다
 
-**이를 위한 대시보드가 없습니다.** 패널을 하나하나 돌아가며 직접 확인해야 합니다.
+**이걸 보여주는 대시보드가 없습니다.** 패널을 하나하나 돌아가며 직접 확인해야 합니다.
 
-**marmonitor**가 이 문제를 해결합니다. tmux.conf에 한 줄만 추가하면, 상태바가 머신에서 실행 중인 모든 AI 세션의 실시간 컨트롤 패널이 됩니다.
+**marmonitor**가 이 문제를 해결합니다. tmux.conf에 한 줄만 추가하면, 상태바가 로컬 머신에서 실행 중인 모든 AI 세션을 실시간으로 보여주는 컨트롤 패널이 됩니다.
 
 <p align="center">
   <img src="docs/use_sample.png" alt="marmonitor tmux 상태바" width="640">
   <br>
-  <em>에이전트 수, 단계 뱃지, 번호가 매겨진 어텐션 필 — 모두 tmux 상태바에 표시됩니다</em>
+  <em>에이전트 수, 단계 뱃지, 번호 붙은 어텐션 필 — 모두 tmux 상태바에서 확인할 수 있습니다</em>
 </p>
 
 ### 주요 기능
@@ -59,9 +59,9 @@ tmux에서 여러 AI 코딩 에이전트를 동시에 실행하는 것은 이제
   <em>모든 세션의 상태, 토큰, 단계, CPU/MEM, 워커 프로세스 트리</em>
 </p>
 
-**계측 불필요** — API 키, 에이전트 플러그인, 코드 변경 없이 사용 가능합니다. marmonitor는 외부에서 로컬 프로세스 정보와 세션 파일을 읽습니다. 시작하려면 두 개의 명령어만 실행하세요: `npm install -g marmonitor` 그리고 `marmonitor setup tmux`.
+**에이전트 수정 불필요** — API 키, 플러그인, 코드 변경 없이 바로 쓸 수 있습니다. marmonitor는 외부에서 로컬 프로세스 정보와 세션 파일을 읽습니다. 명령어 두 개만 실행하면 됩니다: `npm install -g marmonitor`, `marmonitor setup tmux`.
 
-> **tmux + AI 멀티세션 워크플로우를 위해 만들었습니다.** 매일 5개 이상의 AI 코딩 세션을 다양한 프로젝트에서 실행한다면, marmonitor는 컨텍스트 전환을 추측에서 상태바 한 번 확인으로 바꿔줍니다.
+> **tmux + AI 멀티세션 워크플로우에 맞춰 만들었습니다.** 매일 5개 이상의 AI 코딩 세션을 여러 프로젝트에서 실행한다면, marmonitor가 컨텍스트 전환을 추측에서 상태바 한 번 확인으로 바꿔줍니다.
 
 ## 지원 에이전트
 
@@ -87,7 +87,7 @@ marmonitor setup tmux
 
 [marmonitor-tmux](https://github.com/mjjo16/marmonitor-tmux) 플러그인을 `~/.tmux.conf`에 추가합니다. tmux 안에서 `prefix + I`을 눌러 활성화하세요.
 
-`marmonitor`를 업그레이드한 뒤에는 다음 명령으로 tmux 연동 업데이트 경로를 확인하세요:
+`marmonitor`를 업그레이드한 뒤에는 tmux 연동도 업데이트가 필요한지 확인하세요:
 
 ```bash
 marmonitor update-integration
@@ -137,7 +137,19 @@ npm link
 
 ## 빠른 시작
 
-설치가 완료되면 tmux 상태바에 AI 세션 뱃지가 자동으로 표시됩니다. 추가로 제공되는 기능:
+### 데몬 시작
+
+marmonitor는 2초마다 AI 세션을 스캔하는 백그라운드 데몬으로 실행됩니다:
+
+```bash
+marmonitor start        # 데몬 시작
+marmonitor stop         # 데몬 중지
+marmonitor restart      # 데몬 재시작 (예: npm 업데이트 후)
+```
+
+모든 명령어가 동작하려면 데몬이 실행 중이어야 합니다. `marmonitor setup tmux`를 실행하면 자동으로 시작됩니다.
+
+### tmux 단축키
 
 | 단축키 | 동작 |
 |--------|------|
@@ -145,15 +157,32 @@ npm link
 | `prefix + j` | 점프 팝업 — 이동할 세션 선택 |
 | `prefix + m` | 독 — 컴팩트 모니터 패널 |
 | `Option+1~5` | 어텐션 세션 #1~5로 바로 이동 |
+| `Option+`` | 이전 패널로 돌아가기 |
 
-CLI 명령어:
+### CLI 명령어
 
 ```bash
 marmonitor status       # 전체 세션 목록
 marmonitor attention    # 입력이 필요한 세션 확인
+marmonitor activity     # 각 세션의 활동 내역 (도구 호출 + 토큰)
 marmonitor watch        # 실시간 전체 화면 모니터
+marmonitor jump-back    # 마지막 점프 이전 패널로 복귀
 marmonitor help         # 모든 명령어 및 옵션
 ```
+
+### 활동 로그
+
+AI 세션이 실제로 수행한 작업을 추적합니다 — 파일 편집, bash 명령어, 사용 토큰:
+
+```bash
+marmonitor activity                  # 오늘의 활동
+marmonitor activity --pid 1234       # PID로 필터링
+marmonitor activity --session abc    # 세션 ID로 필터링
+marmonitor activity --days 3         # 최근 3일
+marmonitor activity --json           # JSON 출력
+```
+
+활동 내역은 데몬이 자동으로 수집하며 `~/.config/marmonitor/activity-log/`에 저장됩니다 (7일 보관).
 
 ## 단계 아이콘
 
@@ -169,10 +198,10 @@ marmonitor help         # 모든 명령어 및 옵션
 | 레이블 | 의미 |
 |--------|------|
 | `[Active]` | CPU 활동 감지됨 |
-| `[Idle]` | 프로세스 활성 상태이나 최근 활동 없음 |
+| `[Idle]` | 프로세스는 살아 있지만 최근 활동 없음 |
 | `[Stalled]` | 장기간 활동 없음 |
 | `[Dead]` | 세션 파일은 있지만 프로세스가 종료됨 |
-| `[Unmatched]` | AI 프로세스는 발견되었지만 매칭되는 세션 없음 |
+| `[Unmatched]` | AI 프로세스는 발견되었지만 일치하는 세션 없음 |
 
 ## tmux 플러그인
 
@@ -182,11 +211,20 @@ marmonitor help         # 모든 명령어 및 옵션
 - 팝업, 점프, 독 키 바인딩
 - Option+1~5 다이렉트 점프
 
-모든 설정은 `@marmonitor-*` 옵션을 통해 커스터마이징 가능합니다. 자세한 내용은 [플러그인 README](https://github.com/mjjo16/marmonitor-tmux)를 참조하세요.
+`@marmonitor-*` 옵션으로 원하는 대로 바꿀 수 있습니다. 자세한 내용은 [플러그인 README](https://github.com/mjjo16/marmonitor-tmux)를 참조하세요.
+
+### 뱃지 스타일
+
+`integration.tmux.badgeStyle`로 tmux 뱃지와 터미널 텍스트 출력의 스타일을 통일할 수 있습니다.
+
+- `basic` — 기본 컬러 필
+- `basic-mono` — Powerline 테두리의 단색 필
+- `text` — 배경 없는 컬러 텍스트
+- `text-mono` — 회색조 텍스트 전용
 
 ## 설정
 
-설정 파일은 다음 순서로 탐색됩니다 (먼저 발견되는 것이 적용):
+다음 경로를 순서대로 찾아 먼저 발견된 파일을 적용합니다:
 
 1. `$XDG_CONFIG_HOME/marmonitor/settings.json`
 2. `~/.config/marmonitor/settings.json`
@@ -220,6 +258,7 @@ marmonitor settings-init --stdout
   },
   "integration": {
     "tmux": {
+      "badgeStyle": "basic",
       "keys": {
         "attentionPopup": "a",
         "jumpPopup": "j",
@@ -241,9 +280,13 @@ npm uninstall -g marmonitor         # CLI 제거
 ## 안전성
 
 - **기본적으로 읽기 전용** — 관찰만 하며, 세션을 수정하지 않습니다
-- **네트워크 미사용** — 외부 연결 없이 모든 데이터가 로컬에 유지됩니다
+- **네트워크 미사용** — 외부로 연결하지 않으며, 모든 데이터는 로컬에 남습니다
 - **보수적인 기본값** — 모든 연동 기능은 옵트인 방식입니다
 - **tmux 우선** — WezTerm/iTerm2 네이티브 지원은 현재 일시 중단 상태입니다
+
+## 변경 이력
+
+릴리스 이력과 호환성 변경사항은 [CHANGELOG.md](CHANGELOG.md)를 참조하세요.
 
 ## 기여하기
 
@@ -252,10 +295,10 @@ npm uninstall -g marmonitor         # CLI 제거
 ## 알려진 제한사항
 
 - 패널 점프 기능은 tmux가 필요합니다
-- WezTerm / iTerm2 네이티브 바 지원은 현재 일시 중단 상태이며, tmux가 지원되는 표면입니다
+- WezTerm / iTerm2 네이티브 바 지원은 일시 중단 상태이며, 현재 tmux만 지원합니다
 - Gemini 권한 감지는 Ink TUI 아키텍처로 인해 제한적입니다
 - 단계 감지는 휴리스틱 기반으로, 에이전트별 정확도가 다를 수 있습니다
-- macOS 우선 개발이며, Linux 지원은 미테스트 상태입니다
+- macOS 기준으로 개발했으며, Linux에서는 아직 테스트하지 않았습니다
 
 ## 라이선스
 
