@@ -1328,3 +1328,50 @@ describe("buildAttentionItems", () => {
     assert.doesNotMatch(text, /\uE0B6/);
   });
 });
+
+describe("buildAttentionItems branch field", () => {
+  it("propagates branch from AgentSession to AttentionItem", () => {
+    const now = 5_000;
+    const agents = [
+      {
+        pid: 10,
+        agentName: "Claude Code",
+        cwd: "/repo/a",
+        status: "Active",
+        phase: "permission",
+        lastActivityAt: 4000,
+        branch: "feature/42",
+      },
+      {
+        pid: 20,
+        agentName: "Codex",
+        cwd: "/repo/b",
+        status: "Active",
+        phase: "thinking",
+        lastActivityAt: 3000,
+        branch: "main",
+      },
+    ];
+
+    const items = buildAttentionItems(agents, now);
+    assert.equal(items.find((i) => i.pid === 10)?.branch, "feature/42");
+    assert.equal(items.find((i) => i.pid === 20)?.branch, "main");
+  });
+
+  it("sets branch to undefined when AgentSession has no branch", () => {
+    const now = 5_000;
+    const agents = [
+      {
+        pid: 30,
+        agentName: "Claude Code",
+        cwd: "/repo/c",
+        status: "Active",
+        phase: "tool",
+        lastActivityAt: 4000,
+      },
+    ];
+
+    const items = buildAttentionItems(agents, now);
+    assert.equal(items.find((i) => i.pid === 30)?.branch, undefined);
+  });
+});

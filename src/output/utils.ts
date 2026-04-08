@@ -231,6 +231,7 @@ export interface AttentionItem {
   phase?: AgentSession["phase"];
   lastResponseAt?: number;
   lastActivityAt?: number;
+  branch?: string;
 }
 
 export interface StatusPill {
@@ -507,6 +508,7 @@ export function buildAttentionItems(
     phase: agent.phase,
     lastResponseAt: agent.lastResponseAt,
     lastActivityAt: agent.lastActivityAt,
+    branch: agent.branch,
   });
 
   const tier1 = alive

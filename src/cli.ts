@@ -659,9 +659,11 @@ program
 
 program
   .command("attention")
-  .description("Show prioritized sessions that need attention")
+  .description("Show prioritized sessions that need attention, optionally jump to one")
   .option("--json", "Output as JSON")
   .option("--interactive", "Choose an attention item and jump to its tmux pane")
+  .option("--pid <pid>", "Jump to AI session by PID")
+  .option("--attention-index <n>", "Jump to Nth attention item directly")
   .option("--limit <n>", "Max items to show", "12")
   .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
@@ -670,11 +672,77 @@ program
     applyTerminalStyle(config.integration.tmux.badgeStyle);
     const limit = resolveAttentionLimit(opts, config.display.attentionLimit);
     const interactiveLimit = resolveAttentionLimit(opts, config.display.attentionLimit, true);
-    if (opts.interactive && opts.json) {
-      console.error("--interactive cannot be combined with --json.");
-      process.exit(1);
+
+    const useDirectPid = typeof opts.pid === "string";
+    const useDirectIndex = typeof opts.attentionIndex === "string";
+    const useInteractive = Boolean(opts.interactive);
+
+    // Direct jump by PID
+    if (useDirectPid) {
+      const pid = Number.parseInt(opts.pid, 10);
+      if (Number.isNaN(pid)) {
+        console.error(`Invalid pid: ${opts.pid}`);
+        process.exit(1);
+      }
+      const agent = agents.find((a) => a.pid === pid);
+      if (!agent) {
+        const result = {
+          found: false,
+          executed: false,
+          insideTmux: Boolean(process.env.TMUX),
+          pid,
+          message: `AI session not found for pid ${pid}.`,
+        };
+        if (opts.json) {
+          printJumpJson(result);
+        } else {
+          printJumpResult(result);
+        }
+        process.exit(1);
+      }
+      const result = await jumpToAgent(agent);
+      if (opts.json) {
+        printJumpJson(result);
+      } else {
+        printJumpResult(result);
+      }
+      if (!result.found) process.exit(1);
+      return;
     }
-    if (opts.interactive) {
+
+    // Direct jump by attention index
+    if (useDirectIndex) {
+      const selection = Number.parseInt(opts.attentionIndex, 10);
+      if (Number.isNaN(selection) || selection < 1) {
+        console.error(`Invalid attention index: ${opts.attentionIndex}`);
+        process.exit(1);
+      }
+      const item = selectJumpAttentionItem(agents, selection);
+      if (!item) {
+        console.error(`No jumpable attention item at index ${selection}.`);
+        process.exit(1);
+      }
+      const agent = agents.find((a) => a.pid === item.pid);
+      if (!agent) {
+        console.error(`AI session not found for pid ${item.pid}.`);
+        process.exit(1);
+      }
+      const result = await jumpToAgent(agent);
+      if (opts.json) {
+        printJumpJson(result);
+      } else {
+        printJumpResult(result);
+      }
+      if (!result.found) process.exit(1);
+      return;
+    }
+
+    // Interactive chooser
+    if (useInteractive) {
+      if (opts.json) {
+        console.error("--interactive cannot be combined with --json.");
+        process.exit(1);
+      }
       if (!process.stdin.isTTY) {
         console.error("--interactive requires an interactive terminal.");
         process.exit(1);
@@ -722,6 +790,8 @@ program
       if (!result.found) process.exit(1);
       return;
     }
+
+    // Default: list mode
     if (opts.json) {
       printAttentionJson(agents, limit);
     } else {
@@ -926,108 +996,25 @@ program
     console.log(payload.paneOutput ?? "(none)");
   });
 
+// "jump" is kept as an alias for backward compatibility (Option+N bindings, scripts).
+// --attention maps to attention --interactive, --attention-index and --pid pass through.
 program
   .command("jump")
-  .description("Jump to the tmux pane running a specific AI session")
-  .option("--pid <pid>", "AI process PID")
+  .description("Alias for 'attention' — jump to an AI session's tmux pane")
+  .option("--pid <pid>", "Jump to AI session by PID")
   .option("--attention", "Choose from attention items interactively")
-  .option("--attention-index <n>", "Jump to Nth jumpable attention item")
+  .option("--attention-index <n>", "Jump to Nth attention item directly")
   .option("--json", "Output as JSON")
   .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
-    const agents = await requireDaemonSnapshot();
-    const config = await loadConfig(resolveConfigPath(opts));
-    const useAttention = Boolean(opts.attention);
-    const useAttentionIndex = typeof opts.attentionIndex === "string";
-    const usePid = typeof opts.pid === "string";
-
-    const selectedModes = [useAttention, useAttentionIndex, usePid].filter(Boolean).length;
-    if (selectedModes !== 1) {
-      console.error("Use exactly one of --pid <pid>, --attention, or --attention-index <n>.");
-      process.exit(1);
-    }
-
-    let pid: number;
-    if (useAttention) {
-      if (!process.stdin.isTTY) {
-        console.error("--attention requires an interactive terminal.");
-        process.exit(1);
-      }
-      const limit = resolveAttentionLimit(
-        { limit: undefined },
-        config.display.attentionLimit,
-        true,
-      );
-      const totalItems = buildJumpAttentionItems(agents).length;
-      const totalPages = Math.max(1, Math.ceil(totalItems / limit));
-      let currentPage = 1;
-      let item: ReturnType<typeof selectJumpAttentionItemOnPage>;
-      while (true) {
-        clearScreen();
-        console.log(renderJumpAttentionChooser(agents, currentPage, limit));
-        const pageItemCount = Math.min(limit, Math.max(totalItems - (currentPage - 1) * limit, 0));
-        const action = await promptSelectionAction(pageItemCount, currentPage, totalPages);
-        if (!action || action.kind === "cancel") return;
-        if (action.kind === "next") {
-          currentPage = Math.min(currentPage + 1, totalPages);
-          continue;
-        }
-        if (action.kind === "prev") {
-          currentPage = Math.max(currentPage - 1, 1);
-          continue;
-        }
-        item = selectJumpAttentionItemOnPage(agents, currentPage, action.selection, limit);
-        break;
-      }
-      if (!item) {
-        console.error("Invalid selection.");
-        process.exit(1);
-      }
-      pid = item.pid;
-    } else if (useAttentionIndex) {
-      const selection = Number.parseInt(opts.attentionIndex, 10);
-      if (Number.isNaN(selection) || selection < 1) {
-        console.error(`Invalid attention index: ${opts.attentionIndex}`);
-        process.exit(1);
-      }
-      const item = selectJumpAttentionItem(agents, selection);
-      if (!item) {
-        console.error(`No jumpable attention item at index ${selection}.`);
-        process.exit(1);
-      }
-      pid = item.pid;
-    } else {
-      pid = Number.parseInt(opts.pid, 10);
-      if (Number.isNaN(pid)) {
-        console.error(`Invalid pid: ${opts.pid}`);
-        process.exit(1);
-      }
-    }
-
-    const agent = agents.find((item) => item.pid === pid);
-    if (!agent) {
-      const result = {
-        found: false,
-        executed: false,
-        insideTmux: Boolean(process.env.TMUX),
-        pid,
-        message: `AI session not found for pid ${pid}.`,
-      };
-      if (opts.json) {
-        printJumpJson(result);
-      } else {
-        printJumpResult(result);
-      }
-      process.exit(1);
-    }
-
-    const result = await jumpToAgent(agent);
-    if (opts.json) {
-      printJumpJson(result);
-    } else {
-      printJumpResult(result);
-    }
-    if (!result.found) process.exit(1);
+    // Translate jump flags to attention flags and re-parse
+    const args = ["attention"];
+    if (opts.attention) args.push("--interactive");
+    if (opts.attentionIndex) args.push("--attention-index", opts.attentionIndex);
+    if (opts.pid) args.push("--pid", opts.pid);
+    if (opts.json) args.push("--json");
+    if (opts.config) args.push("--config", opts.config);
+    await program.parseAsync(args, { from: "user" });
   });
 
 program
@@ -1130,6 +1117,8 @@ program
   .option("--pid <pid>", "Filter by AI process PID")
   .option("--session <sid>", "Filter by session ID (prefix match)")
   .option("--days <n>", "Number of days to show", "1")
+  .option("--lines <n>", "Max activity lines per session (default 30, max 200)", "30")
+  .option("--order <dir>", "Sort order: desc (newest first) or asc (oldest first)", "desc")
   .option("--json", "Output as JSON")
   .action(async (opts) => {
     const { getConfigDir } = await import("./config/index.js");
@@ -1138,6 +1127,8 @@ program
 
     const logDir = pj(getConfigDir(), "activity-log");
     const days = Math.max(1, Math.min(90, Number(opts.days) || 1));
+    const maxLines = Math.max(1, Math.min(200, Number(opts.lines) || 30));
+    const descOrder = opts.order !== "asc";
     const allEntries = [];
 
     for (const dateStr of getRecentDateKeys(days)) {
@@ -1147,13 +1138,25 @@ program
 
     // Filter
     let filtered = allEntries;
+    let pidFilterAgent:
+      | { agentName: string; pid: number; cwd: string; sessionId: string }
+      | undefined;
     if (opts.pid) {
       const agents = await getAgentsSnapshot();
       const agent = agents.find((a) => a.pid === Number(opts.pid));
       if (agent?.sessionId) {
+        pidFilterAgent = {
+          agentName: agent.agentName,
+          pid: agent.pid,
+          cwd: agent.cwd,
+          sessionId: agent.sessionId,
+        };
         const sidPrefix = agent.sessionId.slice(0, 12);
         filtered = filtered.filter((e) => e.sid.startsWith(sidPrefix));
       } else {
+        pidFilterAgent = agent
+          ? { agentName: agent.agentName, pid: agent.pid, cwd: agent.cwd, sessionId: "" }
+          : undefined;
         filtered = [];
       }
     }
@@ -1163,12 +1166,25 @@ program
     }
 
     if (opts.json) {
+      if (descOrder) filtered.reverse();
       console.log(JSON.stringify(filtered, null, 2));
       return;
     }
 
     if (filtered.length === 0) {
-      console.log("No activity found.");
+      if (pidFilterAgent) {
+        console.log(`No activity found for PID ${pidFilterAgent.pid}.`);
+        console.log(`  Agent: ${pidFilterAgent.agentName}`);
+        console.log(`  CWD:   ${pidFilterAgent.cwd}`);
+        if (pidFilterAgent.sessionId) {
+          console.log(`  SID:   ${pidFilterAgent.sessionId.slice(0, 12)}...`);
+        } else {
+          console.log("  SID:   (no session matched — activity logging may not have started)");
+        }
+        console.log(`\n  Activity log checked: last ${days} day(s) in ${logDir}`);
+      } else {
+        console.log("No activity found.");
+      }
       return;
     }
 
@@ -1197,15 +1213,17 @@ program
         `  ${entries.length} actions  out:${formatTokensShort(totalOut)}  cache:${formatTokensShort(totalCache)}`,
       );
       console.log("  ─────────────────────────────────────");
-      for (const e of entries.slice(-20)) {
+      const sorted = descOrder ? [...entries].reverse() : entries;
+      const shown = sorted.slice(0, maxLines);
+      for (const e of shown) {
         const t = new Date(e.ts * 1000).toLocaleTimeString("en-GB", {
           hour: "2-digit",
           minute: "2-digit",
         });
         console.log(`  ${t}  ${e.tool}: ${truncateForDisplay(e.target, 60)}`);
       }
-      if (entries.length > 20) {
-        console.log(`  ... +${entries.length - 20} more`);
+      if (entries.length > maxLines) {
+        console.log(`  ... +${entries.length - maxLines} more (use --lines to show more)`);
       }
     }
   });
