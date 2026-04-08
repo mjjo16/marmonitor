@@ -3,7 +3,7 @@
  * Reuses watch/dock pattern: light scan every intervalMs, full every detailIntervalMs.
  */
 
-import { open, readdir, stat, unlink } from "node:fs/promises";
+import { open, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { MarmonitorConfig } from "../config/index.js";
 import {
@@ -143,29 +143,16 @@ export async function runDaemonLoop(
               ? codexBindingRegistry.get(`${agent.pid}:${agent.processStartedAt ?? 0}`)?.rolloutPath
               : undefined;
 
-          // Claude: construct path from sessionId
+          // Claude: resolve JSONL path via resolveClaudeSessionFile (projects dir)
           let sessionFile: string | undefined;
           if (agent.agentName === "Claude Code" && agent.sessionId && agent.cwd) {
-            const { getClaudeSessionRoots } = await import("./claude.js");
-            const roots = getClaudeSessionRoots(config);
-            for (const root of roots) {
-              try {
-                const dirs = await readdir(root);
-                for (const dir of dirs) {
-                  const candidate = join(root, dir, `${agent.sessionId}.jsonl`);
-                  try {
-                    await stat(candidate);
-                    sessionFile = candidate;
-                    break;
-                  } catch {
-                    // not here
-                  }
-                }
-                if (sessionFile) break;
-              } catch {
-                // root doesn't exist
-              }
-            }
+            const { resolveClaudeSessionFile } = await import("./claude.js");
+            sessionFile = await resolveClaudeSessionFile(
+              agent.sessionId,
+              agent.cwd,
+              agent.startedAt,
+              config,
+            );
           } else if (agent.agentName === "Codex" && jsonlPath) {
             sessionFile = jsonlPath;
           }
