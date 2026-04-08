@@ -56,9 +56,8 @@ function abbreviateModel(model: string | undefined): string {
   if (model.includes("opus")) return "opus";
   if (model.includes("sonnet")) return "sonnet";
   if (model.includes("haiku")) return "haiku";
-  // For non-Claude models, strip version suffix if too long (e.g. gpt-4o-mini → gpt-4o)
-  if (model.length <= 8) return model;
-  return model.slice(0, 7);
+  if (model.length <= 12) return model;
+  return model.slice(0, 11);
 }
 
 function cwdToProjectName(cwd: string): string {
@@ -227,7 +226,7 @@ export async function printStatus(agents: AgentSession[]): Promise<void> {
     const W = {
       status: 10,
       agent: 7,
-      model: 8,
+      model: 12,
       pid: 6,
       cpu: 6,
       mem: 7,
