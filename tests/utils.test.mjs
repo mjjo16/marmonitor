@@ -667,6 +667,56 @@ describe("buildStatuslineSummary", () => {
     assert.match(text, /#cdd6f4/);
   });
 
+  it("renders block badge style with colored bg but no Powerline glyphs", () => {
+    const snapshot = {
+      aliveCount: 5,
+      waitingCount: 1,
+      riskCount: 0,
+      stalledCount: 0,
+      unmatchedCount: 0,
+      activeCount: 3,
+      highCpuCount: 0,
+      thinkingCount: 1,
+      toolCount: 0,
+      claudeCount: 3,
+      codexCount: 2,
+      geminiCount: 0,
+    };
+    const text = buildTmuxBadgeBar(snapshot, undefined, "block");
+    assert.match(text, /Cl 3/);
+    assert.match(text, /Cx 2/);
+    assert.match(text, /bg=/);
+    assert.doesNotMatch(text, /\uE0B0/);
+    assert.doesNotMatch(text, /\uE0B2/);
+    assert.doesNotMatch(text, /\uE0B4/);
+    assert.doesNotMatch(text, /\uE0B6/);
+  });
+
+  it("renders block-mono badge style without Powerline glyphs", () => {
+    const snapshot = {
+      aliveCount: 2,
+      waitingCount: 0,
+      riskCount: 0,
+      stalledCount: 0,
+      unmatchedCount: 0,
+      activeCount: 1,
+      highCpuCount: 0,
+      thinkingCount: 0,
+      toolCount: 0,
+      claudeCount: 2,
+      codexCount: 0,
+      geminiCount: 0,
+    };
+    const text = buildTmuxBadgeBar(snapshot, undefined, "block-mono");
+    assert.match(text, /Cl 2/);
+    assert.match(text, /#cdd6f4/);
+    assert.match(text, /bg=#313244/);
+    assert.doesNotMatch(text, /\uE0B0/);
+    assert.doesNotMatch(text, /\uE0B2/);
+    assert.doesNotMatch(text, /\uE0B4/);
+    assert.doesNotMatch(text, /\uE0B6/);
+  });
+
   it("defaults to basic style when badgeStyle not specified", () => {
     const snapshot = {
       aliveCount: 1,
@@ -1238,5 +1288,43 @@ describe("buildAttentionItems", () => {
     assert.match(text, /⏳Cl p\/mjjo allow/);
     assert.doesNotMatch(text, /🤔Cl/);
     assert.doesNotMatch(text, /•Cx/);
+  });
+
+  it("renders attention pills in block style without Powerline glyphs", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const text = buildTmuxAttentionPills(
+      [
+        {
+          kind: "permission",
+          priority: 0,
+          pid: 30,
+          agentName: "Claude Code",
+          cwd: "/home/user/projects/myapp",
+          status: "Active",
+          phase: "permission",
+        },
+        {
+          kind: "thinking",
+          priority: 1,
+          pid: 50,
+          agentName: "Codex",
+          cwd: "/home/user/projects/api",
+          status: "Active",
+          phase: "thinking",
+          lastActivityAt: now - 5,
+        },
+      ],
+      5,
+      undefined,
+      "block",
+    );
+    assert.match(text, / 1 /);
+    assert.match(text, /⏳Cl/);
+    assert.match(text, / 2 /);
+    assert.match(text, /🤔Cx/);
+    assert.match(text, /bg=/);
+    assert.doesNotMatch(text, /\uE0B0/);
+    assert.doesNotMatch(text, /\uE0B4/);
+    assert.doesNotMatch(text, /\uE0B6/);
   });
 });
