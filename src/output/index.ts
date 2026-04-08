@@ -51,7 +51,7 @@ export function applyTerminalStyle(badgeStyle: BadgeStyle): void {
   monoMode = badgeStyle === "basic-mono" || badgeStyle === "text-mono";
 }
 
-function abbreviateModel(model: string | undefined): string {
+export function abbreviateModel(model: string | undefined): string {
   if (!model) return "—";
   if (model.includes("opus")) return "opus";
   if (model.includes("sonnet")) return "sonnet";

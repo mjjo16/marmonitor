@@ -111,6 +111,91 @@ describe("config CLI helpers", () => {
       await rm(xdgRoot, { recursive: true });
     }
   });
+
+  it("respects --lines limit", async () => {
+    const xdgRoot = await mkdir(join(tmpdir(), `marmonitor-cli-lines-${Date.now()}`), {
+      recursive: true,
+    });
+    try {
+      const logDir = join(xdgRoot, "marmonitor", "activity-log");
+      await mkdir(logDir, { recursive: true });
+      const today = formatDateKey(new Date());
+      const entries = `${Array.from({ length: 10 }, (_, i) =>
+        JSON.stringify({
+          ts: 1775190000 + i,
+          sid: "abc123456789",
+          agent: "Claude Code",
+          cwd: "/tmp/project",
+          tool: "Edit",
+          target: `src/file${i}.ts`,
+          tokens: { in: 1, out: 10, cache: 0 },
+        }),
+      ).join("\n")}\n`;
+      await writeFile(join(logDir, `${today}.jsonl`), entries, "utf8");
+
+      const output = runCli(["activity", "--lines", "3"], { XDG_CONFIG_HOME: xdgRoot });
+      assert.match(output, /\+7 more/);
+    } finally {
+      await rm(xdgRoot, { recursive: true });
+    }
+  });
+
+  it("returns entries in desc order by default (newest first)", async () => {
+    const xdgRoot = await mkdir(join(tmpdir(), `marmonitor-cli-order-${Date.now()}`), {
+      recursive: true,
+    });
+    try {
+      const logDir = join(xdgRoot, "marmonitor", "activity-log");
+      await mkdir(logDir, { recursive: true });
+      const today = formatDateKey(new Date());
+      const entries = `${[
+        {
+          ts: 1775190001,
+          sid: "abc123456789",
+          agent: "Claude Code",
+          cwd: "/tmp/p",
+          tool: "Edit",
+          target: "first.ts",
+          tokens: { in: 1, out: 1, cache: 0 },
+        },
+        {
+          ts: 1775190002,
+          sid: "abc123456789",
+          agent: "Claude Code",
+          cwd: "/tmp/p",
+          tool: "Edit",
+          target: "second.ts",
+          tokens: { in: 1, out: 1, cache: 0 },
+        },
+        {
+          ts: 1775190003,
+          sid: "abc123456789",
+          agent: "Claude Code",
+          cwd: "/tmp/p",
+          tool: "Edit",
+          target: "third.ts",
+          tokens: { in: 1, out: 1, cache: 0 },
+        },
+      ]
+        .map((e) => JSON.stringify(e))
+        .join("\n")}\n`;
+      await writeFile(join(logDir, `${today}.jsonl`), entries, "utf8");
+
+      // desc (default): third.ts appears before first.ts in JSON output
+      const descOut = JSON.parse(runCli(["activity", "--json"], { XDG_CONFIG_HOME: xdgRoot }));
+      assert.equal(descOut[0].target, "third.ts");
+      assert.equal(descOut[2].target, "first.ts");
+
+      // asc: first.ts appears before third.ts
+      const ascOut = JSON.parse(
+        runCli(["activity", "--json", "--order", "asc"], { XDG_CONFIG_HOME: xdgRoot }),
+      );
+      assert.equal(ascOut[0].target, "first.ts");
+      assert.equal(ascOut[2].target, "third.ts");
+    } finally {
+      await rm(xdgRoot, { recursive: true });
+    }
+  });
 });
 
 describe("postinstall/preuninstall scripts", () => {
