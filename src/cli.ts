@@ -1416,6 +1416,16 @@ async function stopDaemon(): Promise<boolean> {
     return false;
   }
   process.kill(pid, "SIGTERM");
+  // Poll until the process actually dies (up to 3s) to prevent double-start
+  // on restart when the daemon is mid-scan and 500ms isn't enough.
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    try {
+      process.kill(pid, 0);
+    } catch {
+      break; // process confirmed dead
+    }
+  }
   console.log(`✓ Daemon stopped (PID: ${pid})`);
   return true;
 }
@@ -1441,7 +1451,6 @@ program
   .description("Restart background scan daemon")
   .action(async () => {
     await stopDaemon();
-    await new Promise((r) => setTimeout(r, 500));
     await startDaemon();
     process.exit(0);
   });
