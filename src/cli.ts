@@ -1416,15 +1416,23 @@ async function stopDaemon(): Promise<boolean> {
     return false;
   }
   process.kill(pid, "SIGTERM");
-  // Poll until the process actually dies (up to 3s) to prevent double-start
-  // on restart when the daemon is mid-scan and 500ms isn't enough.
-  for (let i = 0; i < 30; i++) {
+  // Poll until the process actually dies (up to 2s) to prevent double-start
+  // on restart when the daemon is mid-scan and a fixed wait isn't enough.
+  let dead = false;
+  for (let i = 0; i < 20; i++) {
     await new Promise((r) => setTimeout(r, 100));
     try {
       process.kill(pid, 0);
     } catch {
+      dead = true;
       break; // process confirmed dead
     }
+  }
+  // Fallback: SIGKILL if still alive after 2s (should not happen in normal operation)
+  if (!dead) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {}
   }
   console.log(`✓ Daemon stopped (PID: ${pid})`);
   return true;
