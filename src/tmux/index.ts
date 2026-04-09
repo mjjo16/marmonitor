@@ -137,6 +137,29 @@ export async function getProcessTree(): Promise<Map<number, number[]>> {
   }
 }
 
+/** Get the PID of the currently active tmux pane */
+export async function getActiveTmuxPanePid(): Promise<number | undefined> {
+  try {
+    const { stdout } = await execFileAsync("tmux", ["display-message", "-p", "#{pane_pid}"]);
+    const pid = Number.parseInt(stdout.trim(), 10);
+    return Number.isFinite(pid) ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Find the agent PID that runs inside the currently active tmux pane */
+export async function findActiveAgentPid(agentPids: number[]): Promise<number | undefined> {
+  if (agentPids.length === 0) return undefined;
+  try {
+    const [activePanePid, childMap] = await Promise.all([getActiveTmuxPanePid(), getProcessTree()]);
+    if (!activePanePid) return undefined;
+    return agentPids.find((pid) => isPidInTree(activePanePid, pid, childMap));
+  } catch {
+    return undefined;
+  }
+}
+
 export async function resolveTmuxJumpTarget(
   agent: Pick<AgentSession, "pid" | "cwd">,
 ): Promise<TmuxJumpTarget | undefined> {

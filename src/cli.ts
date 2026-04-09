@@ -44,7 +44,12 @@ import { parseGeminiSession } from "./scanner/gemini.js";
 import { scanAgents } from "./scanner/index.js";
 import { loadRegistryFromFile } from "./scanner/session-registry.js";
 import { detectCliStdoutPhase } from "./scanner/status.js";
-import { captureTmuxPaneOutput, jumpToAgent, resolveTmuxJumpTarget } from "./tmux/index.js";
+import {
+  captureTmuxPaneOutput,
+  findActiveAgentPid,
+  jumpToAgent,
+  resolveTmuxJumpTarget,
+} from "./tmux/index.js";
 import { getClientTty, jumpBack } from "./tmux/jump-anchor.js";
 import { findClickedAgent, parseStatusClickToken } from "./tmux/status-click.js";
 import type { AgentSession } from "./types.js";
@@ -595,13 +600,19 @@ program
           console.log(renderUnavailableStatusline(opts.statuslineFormat));
           return;
         }
-        // Check jump-back anchor for indicator
+        // Check jump-back anchor and active window for tmux-badges
         let hasJumpAnchor = false;
+        let activeAgentPid: number | undefined;
         if (opts.statuslineFormat === "tmux-badges") {
           const { tmpdir: td } = await import("node:os");
           const { join: pj } = await import("node:path");
           const { loadJumpAnchor } = await import("./tmux/jump-anchor.js");
-          const tty = await getClientTty();
+          const agentPids = agents.map((a) => a.pid);
+          const [tty, resolvedActiveAgentPid] = await Promise.all([
+            getClientTty(),
+            findActiveAgentPid(agentPids),
+          ]);
+          activeAgentPid = resolvedActiveAgentPid;
           if (tty) {
             hasJumpAnchor = Boolean(
               await loadJumpAnchor(pj(td(), "marmonitor", "jump-anchors.json"), tty),
@@ -615,6 +626,7 @@ program
           width,
           config.integration.tmux.badgeStyle,
           hasJumpAnchor,
+          activeAgentPid,
         );
         await writeCachedStatusline(opts.statuslineFormat, attentionLimit, width, rendered);
         console.log(rendered);
