@@ -499,9 +499,19 @@ function resolveAttentionLimit(
   return Math.min(Math.max(Math.floor(fallback), 1), 10);
 }
 
-function statuslineCacheFile(format: string, attentionLimit: number, width?: number): string {
+function statuslineCacheFile(
+  format: string,
+  attentionLimit: number,
+  width?: number,
+  activePanePid?: number,
+): string {
   const widthKey = width && width > 0 ? String(width) : "auto";
-  return join(tmpdir(), "marmonitor", `statusline-${format}-${attentionLimit}-${widthKey}.txt`);
+  const paneKey = activePanePid ? String(activePanePid) : "none";
+  return join(
+    tmpdir(),
+    "marmonitor",
+    `statusline-${format}-${attentionLimit}-${widthKey}-${paneKey}.txt`,
+  );
 }
 
 async function readCachedStatusline(
@@ -509,8 +519,9 @@ async function readCachedStatusline(
   attentionLimit: number,
   width: number | undefined,
   ttlMs: number,
+  activePanePid?: number,
 ): Promise<string | undefined> {
-  const path = statuslineCacheFile(format, attentionLimit, width);
+  const path = statuslineCacheFile(format, attentionLimit, width, activePanePid);
   try {
     const fileStat = await stat(path);
     if (Date.now() - fileStat.mtimeMs > ttlMs) return undefined;
@@ -525,8 +536,9 @@ async function writeCachedStatusline(
   attentionLimit: number,
   width: number | undefined,
   value: string,
+  activePanePid?: number,
 ): Promise<void> {
-  const path = statuslineCacheFile(format, attentionLimit, width);
+  const path = statuslineCacheFile(format, attentionLimit, width, activePanePid);
   try {
     await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
     await writeFile(path, value, "utf-8");
@@ -585,11 +597,18 @@ program
         }
         const attentionLimit = config.display.statuslineAttentionLimit;
         const width = resolveStatuslineWidth(opts.width);
+        // Resolve active pane PID early (~5ms tmux call) so the cache key
+        // reflects the current window — otherwise the highlight goes stale
+        // when the user switches tmux windows within the cache TTL.
+        const { getActiveTmuxPanePid } = await import("./tmux/index.js");
+        const activePanePid =
+          opts.statuslineFormat === "tmux-badges" ? await getActiveTmuxPanePid() : undefined;
         const cached = await readCachedStatusline(
           opts.statuslineFormat,
           attentionLimit,
           width,
           config.performance.statuslineTtlMs,
+          activePanePid,
         );
         if (cached) {
           console.log(cached);
@@ -600,7 +619,7 @@ program
           console.log(renderUnavailableStatusline(opts.statuslineFormat));
           return;
         }
-        // Check jump-back anchor and active window for tmux-badges
+        // Check jump-back anchor and resolve active agent for tmux-badges
         let hasJumpAnchor = false;
         let activeAgentPid: number | undefined;
         if (opts.statuslineFormat === "tmux-badges") {
@@ -610,7 +629,7 @@ program
           const agentPids = agents.map((a) => a.pid);
           const [tty, resolvedActiveAgentPid] = await Promise.all([
             getClientTty(),
-            findActiveAgentPid(agentPids),
+            findActiveAgentPid(agentPids, activePanePid),
           ]);
           activeAgentPid = resolvedActiveAgentPid;
           if (tty) {
@@ -628,7 +647,13 @@ program
           hasJumpAnchor,
           activeAgentPid,
         );
-        await writeCachedStatusline(opts.statuslineFormat, attentionLimit, width, rendered);
+        await writeCachedStatusline(
+          opts.statuslineFormat,
+          attentionLimit,
+          width,
+          rendered,
+          activePanePid,
+        );
         console.log(rendered);
         return;
       } catch {
