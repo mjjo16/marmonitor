@@ -1290,6 +1290,75 @@ describe("buildAttentionItems", () => {
     assert.doesNotMatch(text, /•Cx/);
   });
 
+  it("highlights the active agent pill with underscore styling", () => {
+    const now = Math.floor(Date.now() / 1000);
+    const items = [
+      {
+        kind: "permission",
+        priority: 0,
+        pid: 30,
+        agentName: "Claude Code",
+        cwd: "/home/user/projects/myapp",
+        status: "Active",
+        phase: "permission",
+      },
+      {
+        kind: "thinking",
+        priority: 1,
+        pid: 50,
+        agentName: "Claude Code",
+        cwd: "/home/user/projects/api",
+        status: "Active",
+        phase: "thinking",
+        lastActivityAt: now - 5,
+      },
+    ];
+
+    const withActive = buildTmuxAttentionPills(items, 5, undefined, "basic", 50);
+    const withoutActive = buildTmuxAttentionPills(items, 5, undefined, "basic");
+
+    assert.notEqual(withActive, withoutActive);
+    assert.match(withActive, /underscore/);
+  });
+
+  it("does not highlight any pill when activeAgentPid does not match", () => {
+    const items = [
+      {
+        kind: "permission",
+        priority: 0,
+        pid: 30,
+        agentName: "Claude Code",
+        cwd: "/home/user/projects/myapp",
+        status: "Active",
+        phase: "permission",
+      },
+    ];
+
+    const withUnknownPid = buildTmuxAttentionPills(items, 5, undefined, "basic", 9999);
+    const withoutActive = buildTmuxAttentionPills(items, 5, undefined, "basic");
+
+    assert.equal(withUnknownPid, withoutActive);
+  });
+
+  it("highlights active pill in block style without Powerline glyphs", () => {
+    const items = [
+      {
+        kind: "thinking",
+        priority: 1,
+        pid: 42,
+        agentName: "Codex",
+        cwd: "/home/user/projects/api",
+        status: "Active",
+        phase: "thinking",
+      },
+    ];
+
+    const text = buildTmuxAttentionPills(items, 5, undefined, "block", 42);
+    assert.match(text, /underscore/);
+    assert.match(text, /🤔Cx/);
+    assert.doesNotMatch(text, /[\uE0B0\uE0B2\uE0B4\uE0B6]/);
+  });
+
   it("renders attention pills in block style without Powerline glyphs", () => {
     const now = Math.floor(Date.now() / 1000);
     const text = buildTmuxAttentionPills(

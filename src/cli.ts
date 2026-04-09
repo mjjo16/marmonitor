@@ -44,7 +44,12 @@ import { parseGeminiSession } from "./scanner/gemini.js";
 import { scanAgents } from "./scanner/index.js";
 import { loadRegistryFromFile } from "./scanner/session-registry.js";
 import { detectCliStdoutPhase } from "./scanner/status.js";
-import { captureTmuxPaneOutput, jumpToAgent, resolveTmuxJumpTarget } from "./tmux/index.js";
+import {
+  captureTmuxPaneOutput,
+  findActiveAgentPid,
+  jumpToAgent,
+  resolveTmuxJumpTarget,
+} from "./tmux/index.js";
 import { getClientTty, jumpBack } from "./tmux/jump-anchor.js";
 import { findClickedAgent, parseStatusClickToken } from "./tmux/status-click.js";
 import type { AgentSession } from "./types.js";
@@ -499,17 +504,28 @@ function statuslineCacheFile(format: string, attentionLimit: number, width?: num
   return join(tmpdir(), "marmonitor", `statusline-${format}-${attentionLimit}-${widthKey}.txt`);
 }
 
+/** Read cached statusline. When activePanePid is provided, the cache is
+ *  only valid if the stored panePid (first line) matches — otherwise the
+ *  active-window highlight would be stale. Returns {content, panePid}. */
 async function readCachedStatusline(
   format: string,
   attentionLimit: number,
   width: number | undefined,
   ttlMs: number,
-): Promise<string | undefined> {
+): Promise<{ content: string; panePid: number | undefined } | undefined> {
   const path = statuslineCacheFile(format, attentionLimit, width);
   try {
     const fileStat = await stat(path);
     if (Date.now() - fileStat.mtimeMs > ttlMs) return undefined;
-    return (await readFile(path, "utf-8")).trimEnd();
+    const raw = (await readFile(path, "utf-8")).trimEnd();
+    const newline = raw.indexOf("\n");
+    if (newline === -1) return { content: raw, panePid: undefined };
+    const firstLine = raw.slice(0, newline);
+    const pid = Number.parseInt(firstLine, 10);
+    if (Number.isFinite(pid)) {
+      return { content: raw.slice(newline + 1), panePid: pid };
+    }
+    return { content: raw, panePid: undefined };
   } catch {
     return undefined;
   }
@@ -520,11 +536,13 @@ async function writeCachedStatusline(
   attentionLimit: number,
   width: number | undefined,
   value: string,
+  activePanePid?: number,
 ): Promise<void> {
   const path = statuslineCacheFile(format, attentionLimit, width);
+  const data = activePanePid ? `${activePanePid}\n${value}` : value;
   try {
     await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
-    await writeFile(path, value, "utf-8");
+    await writeFile(path, data, "utf-8");
   } catch {
     // cache failures must never break statusline rendering
   }
@@ -580,6 +598,10 @@ program
         }
         const attentionLimit = config.display.statuslineAttentionLimit;
         const width = resolveStatuslineWidth(opts.width);
+        const isTmuxBadges = opts.statuslineFormat === "tmux-badges";
+        // Try cache first. For tmux-badges the cached panePid is checked
+        // against the live pane only on cache hit — the tmux call is
+        // deferred so cache-miss paths pay for it just once.
         const cached = await readCachedStatusline(
           opts.statuslineFormat,
           attentionLimit,
@@ -587,21 +609,38 @@ program
           config.performance.statuslineTtlMs,
         );
         if (cached) {
-          console.log(cached);
-          return;
+          if (isTmuxBadges && cached.panePid !== undefined) {
+            const { getActiveTmuxPanePid } = await import("./tmux/index.js");
+            const currentPanePid = await getActiveTmuxPanePid();
+            if (currentPanePid !== cached.panePid) {
+              // Active pane changed — fall through to re-render
+            } else {
+              console.log(cached.content);
+              return;
+            }
+          } else {
+            console.log(cached.content);
+            return;
+          }
         }
         const agents = await getAgentsSnapshot();
         if (agents.length === 0) {
           console.log(renderUnavailableStatusline(opts.statuslineFormat));
           return;
         }
-        // Check jump-back anchor for indicator
+        // Check jump-back anchor and resolve active agent for tmux-badges
         let hasJumpAnchor = false;
-        if (opts.statuslineFormat === "tmux-badges") {
+        let activeAgentPid: number | undefined;
+        let activePanePid: number | undefined;
+        if (isTmuxBadges) {
           const { tmpdir: td } = await import("node:os");
           const { join: pj } = await import("node:path");
           const { loadJumpAnchor } = await import("./tmux/jump-anchor.js");
-          const tty = await getClientTty();
+          const { getActiveTmuxPanePid } = await import("./tmux/index.js");
+          const agentPids = agents.map((a) => a.pid);
+          const [tty, panePid] = await Promise.all([getClientTty(), getActiveTmuxPanePid()]);
+          activePanePid = panePid;
+          activeAgentPid = await findActiveAgentPid(agentPids, activePanePid);
           if (tty) {
             hasJumpAnchor = Boolean(
               await loadJumpAnchor(pj(td(), "marmonitor", "jump-anchors.json"), tty),
@@ -615,8 +654,15 @@ program
           width,
           config.integration.tmux.badgeStyle,
           hasJumpAnchor,
+          activeAgentPid,
         );
-        await writeCachedStatusline(opts.statuslineFormat, attentionLimit, width, rendered);
+        await writeCachedStatusline(
+          opts.statuslineFormat,
+          attentionLimit,
+          width,
+          rendered,
+          activePanePid,
+        );
         console.log(rendered);
         return;
       } catch {

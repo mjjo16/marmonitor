@@ -9,6 +9,8 @@
 export interface BadgeTheme {
   badge: string;
   attention: string;
+  /** Attention segment for the currently active tmux window */
+  attentionActive: string;
   focus: string;
   empty: string;
   jumpBack: string;
@@ -19,6 +21,8 @@ export const BADGE_THEMES: Record<string, BadgeTheme> = {
     badge: "#[fg={bg},bg=#1e1e2e]#[bold,fg={fg},bg={bg}] {label} #[fg={bg},bg=#1e1e2e]#[default]",
     attention:
       "#[fg={bg},bg=#1e1e2e]#[bold,fg=#11111b,bg={bg}] {index} #[fg=#313244,bg={bg}]#[fg=#cdd6f4,bg=#313244] {label} #[fg=#313244,bg=#1e1e2e]#[default]",
+    attentionActive:
+      "#[fg={bg},bg=#1e1e2e]#[bold,underscore,fg=#11111b,bg={bg}] {index} #[fg=#45475a,bg={bg}]#[underscore,fg=#cdd6f4,bg=#45475a] {label} #[fg=#45475a,bg=#1e1e2e]#[default]",
     focus: "#[fg=#bac2de,bg=#181825] {text} #[default]",
     empty: "#[fg=#cdd6f4,bg=#313244] no active #[fg=#313244,bg=#1e1e2e]#[default]",
     jumpBack:
@@ -29,6 +33,8 @@ export const BADGE_THEMES: Record<string, BadgeTheme> = {
       "#[fg=#313244,bg=#1e1e2e]#[bold,fg=#cdd6f4,bg=#313244] {label} #[fg=#313244,bg=#1e1e2e]#[default]",
     attention:
       "#[fg=#313244,bg=#1e1e2e]#[bold,fg=#cdd6f4,bg=#313244] {index} #[fg=#1e1e2e,bg=#313244]#[fg=#6c7086,bg=#1e1e2e] {label} #[fg=#1e1e2e]#[default]",
+    attentionActive:
+      "#[fg=#45475a,bg=#1e1e2e]#[bold,underscore,fg=#cdd6f4,bg=#45475a] {index} #[fg=#1e1e2e,bg=#45475a]#[underscore,fg=#cdd6f4,bg=#1e1e2e] {label} #[fg=#1e1e2e]#[default]",
     focus: "#[fg=#6c7086,bg=#181825] {text} #[default]",
     empty:
       "#[fg=#313244,bg=#1e1e2e]#[fg=#6c7086,bg=#313244] no active #[fg=#313244,bg=#1e1e2e]#[default]",
@@ -38,6 +44,8 @@ export const BADGE_THEMES: Record<string, BadgeTheme> = {
   block: {
     badge: "#[bold,fg={fg},bg={bg}] {label} #[default]",
     attention: "#[bold,fg=#11111b,bg={bg}] {index} #[fg=#cdd6f4,bg=#313244] {label} #[default]",
+    attentionActive:
+      "#[bold,underscore,fg=#11111b,bg={bg}] {index} #[underscore,fg=#cdd6f4,bg=#45475a] {label} #[default]",
     focus: "#[fg=#bac2de,bg=#181825] {text} #[default]",
     empty: "#[fg=#cdd6f4,bg=#313244] no active #[default]",
     jumpBack: "#[fg=#bac2de,bg=#45475a] ↩ #[default]",
@@ -45,6 +53,8 @@ export const BADGE_THEMES: Record<string, BadgeTheme> = {
   "block-mono": {
     badge: "#[bold,fg=#cdd6f4,bg=#313244] {label} #[default]",
     attention: "#[bold,fg=#cdd6f4,bg=#313244] {index} #[fg=#6c7086,bg=#1e1e2e] {label} #[default]",
+    attentionActive:
+      "#[bold,underscore,fg=#cdd6f4,bg=#45475a] {index} #[underscore,fg=#cdd6f4,bg=#1e1e2e] {label} #[default]",
     focus: "#[fg=#6c7086,bg=#181825] {text} #[default]",
     empty: "#[fg=#6c7086,bg=#313244] no active #[default]",
     jumpBack: "#[fg=#6c7086,bg=#313244] ↩ #[default]",
@@ -52,6 +62,7 @@ export const BADGE_THEMES: Record<string, BadgeTheme> = {
   text: {
     badge: "#[fg={bg}]{label}#[default]",
     attention: "#[fg={bg}]{index} {label}#[default]",
+    attentionActive: "#[underscore,fg={bg}]{index} {label}#[default]",
     focus: "{text}",
     empty: "no active",
     jumpBack: "#[fg=#89b4fa]↩#[default]",
@@ -59,6 +70,8 @@ export const BADGE_THEMES: Record<string, BadgeTheme> = {
   "text-mono": {
     badge: "#[fg=#cdd6f4]{label}#[default]",
     attention: "#[bold,fg=#cdd6f4]{index}#[default] #[fg=#6c7086]{label}#[default]",
+    attentionActive:
+      "#[bold,underscore,fg=#cdd6f4]{index}#[default] #[underscore,fg=#6c7086]{label}#[default]",
     focus: "#[fg=#6c7086]{text}#[default]",
     empty: "#[fg=#6c7086]no active#[default]",
     jumpBack: "#[fg=#6c7086]↩#[default]",
@@ -76,6 +89,18 @@ export function renderAttention(
   bg: string,
 ): string {
   return theme.attention
+    .replaceAll("{index}", String(index))
+    .replaceAll("{label}", label)
+    .replaceAll("{bg}", bg);
+}
+
+export function renderAttentionActive(
+  theme: BadgeTheme,
+  index: number,
+  label: string,
+  bg: string,
+): string {
+  return theme.attentionActive
     .replaceAll("{index}", String(index))
     .replaceAll("{label}", label)
     .replaceAll("{bg}", bg);
