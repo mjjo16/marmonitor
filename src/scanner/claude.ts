@@ -30,6 +30,35 @@ import {
 } from "./cache.js";
 import type { PhaseResult } from "./cache.js";
 
+async function listClaudeSessionCandidates(
+  projectDirName: string,
+  projectRoots: string[],
+): Promise<Array<{ path: string; mtimeMs: number }>> {
+  const candidates: Array<{ path: string; mtimeMs: number }> = [];
+
+  for (const projectsDir of projectRoots) {
+    const projectDir = join(projectsDir, projectDirName);
+    if (!existsSync(projectDir)) continue;
+    const files = await readdir(projectDir);
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue;
+      const candidatePath = join(projectDir, file);
+      try {
+        const fileStat = await stat(candidatePath);
+        candidates.push({ path: candidatePath, mtimeMs: fileStat.mtimeMs });
+      } catch {
+        // skip candidate
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function isDirectSessionFile(path: string | undefined, sessionId: string): boolean {
+  return Boolean(path && basename(path) === `${sessionId}.jsonl`);
+}
+
 export function getClaudeProjectRoots(config?: MarmonitorConfig): string[] {
   return config
     ? resolveRuntimeDataPaths(config).claudeProjects
@@ -110,6 +139,7 @@ export async function findClaudeProjectDir(
               cwd,
               firstSeenOffset: 0,
               source: "claude",
+              binding: "direct",
             });
             claudeProjectDirCache.set(cacheKey, dir);
             return dir;
@@ -130,12 +160,11 @@ export async function resolveClaudeSessionFile(
   startedAt?: number,
   config?: MarmonitorConfig,
 ): Promise<string | undefined> {
-  const registeredPath = resolveSessionRegistryPath(claudeSessionRegistry, sessionId);
-  // Only trust registry if the filename contains the sessionId (direct match).
-  // A registered path whose filename doesn't include the sessionId was set via
-  // mtime-based fallback and may be wrong — re-verify by checking the direct path first.
-  const registeredIsDirect = registeredPath != null && basename(registeredPath).includes(sessionId);
-  if (registeredIsDirect && existsSync(registeredPath as string)) return registeredPath as string;
+  const registeredEntry = claudeSessionRegistry.get(sessionId);
+  const registeredPath = registeredEntry?.filePath;
+  if (registeredEntry?.binding === "direct" && registeredPath && existsSync(registeredPath)) {
+    return registeredPath;
+  }
 
   const projectDirName = await findClaudeProjectDir(cwd, sessionId, config);
   if (!projectDirName) {
@@ -155,80 +184,21 @@ export async function resolveClaudeSessionFile(
         firstSeenOffset: 0,
         startedAt,
         source: "claude",
+        binding: "direct",
       });
       return directPath;
     }
   }
 
-  // Direct file not found yet; use mtime-matched registry entry as provisional fallback
-  if (registeredPath && existsSync(registeredPath)) return registeredPath;
-
-  if (!startedAt) return undefined;
-
-  try {
-    const candidates: Array<{ path: string; deltaSec: number; mtimeMs: number }> = [];
-
-    for (const projectsDir of projectRoots) {
-      const projectDir = join(projectsDir, projectDirName);
-      if (!existsSync(projectDir)) continue;
-      const files = await readdir(projectDir);
-      for (const file of files) {
-        if (!file.endsWith(".jsonl")) continue;
-        const candidatePath = join(projectDir, file);
-        try {
-          const fileStat = await stat(candidatePath);
-          candidates.push({
-            path: candidatePath,
-            deltaSec: Math.abs(fileStat.mtimeMs / 1000 - startedAt),
-            mtimeMs: fileStat.mtimeMs,
-          });
-        } catch {
-          // skip candidate
-        }
-      }
-    }
-
-    candidates.sort((a, b) => a.deltaSec - b.deltaSec);
-    const best = candidates[0];
-    const second = candidates[1];
-    if (!best || best.deltaSec > CLAUDE_SESSION_MTIME_MATCH_SEC) {
-      const fallbackPath = selectRecentSessionFile(candidates);
-      if (!fallbackPath) return undefined;
-      upsertSessionRegistryEntry(claudeSessionRegistry, {
-        filePath: fallbackPath,
-        sessionId,
-        cwd,
-        firstSeenOffset: 0,
-        startedAt,
-        source: "claude",
-      });
-      return fallbackPath;
-    }
-    if (second && second.deltaSec - best.deltaSec < CLAUDE_SESSION_AMBIGUITY_GAP_SEC) {
-      const fallbackPath = selectRecentSessionFile(candidates);
-      if (!fallbackPath) return undefined;
-      upsertSessionRegistryEntry(claudeSessionRegistry, {
-        filePath: fallbackPath,
-        sessionId,
-        cwd,
-        firstSeenOffset: 0,
-        startedAt,
-        source: "claude",
-      });
-      return fallbackPath;
-    }
-    upsertSessionRegistryEntry(claudeSessionRegistry, {
-      filePath: best.path,
-      sessionId,
-      cwd,
-      firstSeenOffset: 0,
-      startedAt,
-      source: "claude",
-    });
-    return best.path;
-  } catch {
-    return undefined;
+  // For a known sessionId, never guess another file by recency alone.
+  // Provisional registry entries are allowed only when they were already
+  // associated with this same session during an earlier match step.
+  if (registeredEntry?.binding === "provisional" && registeredPath && existsSync(registeredPath)) {
+    return registeredPath;
   }
+
+  void startedAt;
+  return undefined;
 }
 
 /** Parse Claude session JSONL for token usage (streaming, stops early for large files) */
@@ -488,7 +458,7 @@ export async function detectClaudePhase(
  * Read the first line of a JSONL file to extract session metadata.
  * Returns undefined if the file can't be read or parsed.
  */
-async function readJsonlFirstLine(
+async function readJsonlSessionMeta(
   filePath: string,
 ): Promise<{ sessionId?: string; cwd?: string; timestamp?: string } | undefined> {
   let fd: Awaited<ReturnType<typeof open>> | undefined;
@@ -496,14 +466,80 @@ async function readJsonlFirstLine(
     fd = await open(filePath, "r");
     const buf = Buffer.alloc(4096);
     await fd.read(buf, 0, 4096, 0);
-    const firstLine = buf.toString("utf-8").split("\n")[0];
-    if (!firstLine) return undefined;
-    return JSON.parse(firstLine);
+    const lines = buf
+      .toString("utf-8")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    const meta: { sessionId?: string; cwd?: string; timestamp?: string } = {};
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (!meta.sessionId && typeof entry?.sessionId === "string") meta.sessionId = entry.sessionId;
+        if (!meta.cwd && typeof entry?.cwd === "string") meta.cwd = entry.cwd;
+        if (!meta.timestamp) {
+          if (typeof entry?.timestamp === "string") meta.timestamp = entry.timestamp;
+          else if (typeof entry?.snapshot?.timestamp === "string") meta.timestamp = entry.snapshot.timestamp;
+        }
+        if (meta.sessionId && meta.cwd && meta.timestamp) return meta;
+      } catch {
+        // ignore malformed line
+      }
+    }
+    return meta.sessionId || meta.cwd || meta.timestamp ? meta : undefined;
   } catch {
     return undefined;
   } finally {
     await fd?.close().catch(() => {});
   }
+}
+
+async function chooseStaleSessionOverride(
+  processCwd: string,
+  currentSessionId: string | undefined,
+  config?: MarmonitorConfig,
+): Promise<{ sessionId: string; cwd?: string; timestamp?: string; filePath: string } | undefined> {
+  const projectDirName = await findClaudeProjectDir(processCwd, currentSessionId, config);
+  if (!projectDirName) return undefined;
+
+  const candidates = await listClaudeSessionCandidates(projectDirName, getClaudeProjectRoots(config));
+  const recentPath = selectRecentSessionFile(candidates);
+  if (!recentPath) return undefined;
+
+  if (currentSessionId && isDirectSessionFile(recentPath, currentSessionId)) {
+    return undefined;
+  }
+
+  const currentDirectPath =
+    currentSessionId != null
+      ? getClaudeProjectRoots(config)
+          .map((projectsDir) => join(projectsDir, projectDirName, `${currentSessionId}.jsonl`))
+          .find((candidate) => existsSync(candidate))
+      : undefined;
+
+  if (currentDirectPath) {
+    try {
+      const [recentStat, currentStat] = await Promise.all([stat(recentPath), stat(currentDirectPath)]);
+      const minLeadMs = 5 * 60 * 1000;
+      const staleGapMs = 30 * 60 * 1000;
+      if (recentStat.mtimeMs - currentStat.mtimeMs < minLeadMs) return undefined;
+      if (Date.now() - currentStat.mtimeMs < staleGapMs) return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  const recentMeta = await readJsonlSessionMeta(recentPath);
+  if (!recentMeta?.sessionId) return undefined;
+  if (recentMeta.sessionId === currentSessionId) return undefined;
+
+  return {
+    sessionId: recentMeta.sessionId,
+    cwd: recentMeta.cwd ?? processCwd,
+    timestamp: recentMeta.timestamp,
+    filePath: recentPath,
+  };
 }
 
 /**
@@ -558,7 +594,7 @@ export async function matchClaudeSessionByMtime(
     // Read first lines to get creation timestamps and match by proximity
     const scored: Array<{ path: string; deltaSec: number; mtimeMs: number }> = [];
     for (const c of pool) {
-      const firstLine = await readJsonlFirstLine(c.path);
+      const firstLine = await readJsonlSessionMeta(c.path);
       if (!firstLine?.timestamp) continue;
       const createdAt = new Date(firstLine.timestamp).getTime() / 1000;
       scored.push({
@@ -589,7 +625,7 @@ export async function matchClaudeSessionByMtime(
   }
 
   // Read first line for session metadata
-  const entry = await readJsonlFirstLine(bestPath);
+  const entry = await readJsonlSessionMeta(bestPath);
   if (!entry?.sessionId) return undefined;
 
   try {
@@ -612,6 +648,7 @@ export async function matchClaudeSessionByMtime(
       firstSeenOffset: 0,
       startedAt: result.startedAt,
       source: "claude",
+      binding: basename(bestPath).includes(entry.sessionId) ? "direct" : "provisional",
     });
 
     const tokenData = await parseClaudeTokens(
@@ -645,20 +682,45 @@ export async function parseClaudeSession(
       const fileStat = await stat(sessionFile);
       const raw = await readFile(sessionFile, "utf-8");
       const data = JSON.parse(raw);
+      const processCwd = cwd ?? data.cwd;
+      const sessionStartedAt = data.startedAt ? data.startedAt / 1000 : undefined;
+      let resolvedSessionId: string | undefined = data.sessionId;
+      let resolvedCwd: string | undefined = data.cwd;
+      let resolvedStartedAt = sessionStartedAt;
+
+      if (processCwd && processCwd !== "unknown") {
+        const override = await chooseStaleSessionOverride(processCwd, data.sessionId, config);
+        if (override) {
+          resolvedSessionId = override.sessionId;
+          resolvedCwd = override.cwd ?? processCwd;
+          resolvedStartedAt = override.timestamp
+            ? new Date(override.timestamp).getTime() / 1000
+            : sessionStartedAt;
+          upsertSessionRegistryEntry(claudeSessionRegistry, {
+            filePath: override.filePath,
+            sessionId: override.sessionId,
+            cwd: resolvedCwd ?? processCwd,
+            firstSeenOffset: 0,
+            startedAt: resolvedStartedAt,
+            source: "claude",
+            binding: "provisional",
+          });
+        }
+      }
 
       const result: Partial<AgentSession> = {
-        cwd: data.cwd,
-        sessionId: data.sessionId,
-        startedAt: data.startedAt ? data.startedAt / 1000 : undefined,
+        cwd: resolvedCwd,
+        sessionId: resolvedSessionId,
+        startedAt: resolvedStartedAt,
         lastActivityAt: fileStat.mtimeMs / 1000,
         sessionMatched: true,
       };
 
-      if (data.sessionId && data.cwd) {
+      if (resolvedSessionId && resolvedCwd) {
         const tokenData = await parseClaudeTokens(
-          data.sessionId,
-          data.cwd,
-          data.startedAt ? data.startedAt / 1000 : undefined,
+          resolvedSessionId,
+          resolvedCwd,
+          resolvedStartedAt,
           config,
         );
         result.tokenUsage = tokenData.tokenUsage;

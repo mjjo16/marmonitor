@@ -193,6 +193,7 @@ export async function indexCodexSessions(
           startedAt: s.timestamp,
           model: s.model,
           source: "codex",
+          binding: "direct",
         });
       }
       if (!hasTargetedFilter) {
@@ -291,6 +292,7 @@ export async function indexCodexSessions(
                 startedAt: meta.timestamp,
                 model: meta.model,
                 source: "codex",
+                binding: "direct",
               });
               metas.push(parsed);
             }

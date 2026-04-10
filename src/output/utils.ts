@@ -272,6 +272,7 @@ export interface SessionRegistryEntry {
   startedAt?: number;
   model?: string;
   source: "claude" | "codex";
+  binding: "direct" | "provisional";
 }
 
 export interface SessionFileCandidate {
@@ -410,7 +411,10 @@ export function upsertSessionRegistryEntry(
   registry: Map<string, SessionRegistryEntry>,
   entry: SessionRegistryEntry,
 ): void {
-  registry.set(entry.sessionId, entry);
+  registry.set(entry.sessionId, {
+    ...entry,
+    binding: entry.binding ?? "provisional",
+  });
 }
 
 export function selectRecentSessionFile(
