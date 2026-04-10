@@ -1440,10 +1440,21 @@ program
     console.log("  $ rm -rf ~/.tmux/plugins/marmonitor-tmux  # tpm plugin");
   });
 
+/** Find all running marmonitor daemon PIDs (excludes current CLI process) */
+async function findRunningDaemonPids(): Promise<number[]> {
+  try {
+    const { default: psList } = await import("ps-list");
+    const procs = await psList();
+    return procs.filter((p) => p.name === "marmonitor" && p.pid !== process.pid).map((p) => p.pid);
+  } catch {
+    return [];
+  }
+}
+
 async function startDaemon(): Promise<number | undefined> {
-  if (await isDaemonRunning(DAEMON_PID_PATH)) {
-    const pid = await readDaemonPid(DAEMON_PID_PATH);
-    console.log(`Daemon already running (PID: ${pid})`);
+  const running = await findRunningDaemonPids();
+  if (running.length > 0) {
+    console.log(`Daemon already running (PID: ${running[0]})`);
     return undefined;
   }
   const { fork } = await import("node:child_process");
@@ -1456,31 +1467,38 @@ async function startDaemon(): Promise<number | undefined> {
 }
 
 async function stopDaemon(): Promise<boolean> {
-  const pid = await readDaemonPid(DAEMON_PID_PATH);
-  if (!pid || !(await isDaemonRunning(DAEMON_PID_PATH))) {
+  const pids = await findRunningDaemonPids();
+  if (pids.length === 0) {
     console.log("Daemon is not running.");
     return false;
   }
-  process.kill(pid, "SIGTERM");
-  // Poll until the process actually dies (up to 2s) to prevent double-start
-  // on restart when the daemon is mid-scan and a fixed wait isn't enough.
-  let dead = false;
+  // Send SIGTERM to all running daemon processes (handles orphans)
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+  }
+  // Poll until all processes die (up to 2s)
+  let remaining = [...pids];
   for (let i = 0; i < 20; i++) {
     await new Promise((r) => setTimeout(r, 100));
-    try {
-      process.kill(pid, 0);
-    } catch {
-      dead = true;
-      break; // process confirmed dead
-    }
+    remaining = remaining.filter((pid) => {
+      try {
+        process.kill(pid, 0);
+        return true; // still alive
+      } catch {
+        return false; // dead
+      }
+    });
+    if (remaining.length === 0) break;
   }
-  // Fallback: SIGKILL if still alive after 2s (should not happen in normal operation)
-  if (!dead) {
+  // Fallback: SIGKILL any survivors
+  for (const pid of remaining) {
     try {
       process.kill(pid, "SIGKILL");
     } catch {}
   }
-  console.log(`✓ Daemon stopped (PID: ${pid})`);
+  console.log(`✓ Daemon stopped (PID: ${pids.join(", ")})`);
   return true;
 }
 
