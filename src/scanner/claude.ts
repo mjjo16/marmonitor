@@ -4,7 +4,7 @@
 
 import { existsSync } from "node:fs";
 import { realpath as fsRealpath, open, readFile, readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import type { MarmonitorConfig } from "../config/index.js";
 import { resolveRuntimeDataPaths } from "../config/index.js";
@@ -131,10 +131,18 @@ export async function resolveClaudeSessionFile(
   config?: MarmonitorConfig,
 ): Promise<string | undefined> {
   const registeredPath = resolveSessionRegistryPath(claudeSessionRegistry, sessionId);
-  if (registeredPath && existsSync(registeredPath)) return registeredPath;
+  // Only trust registry if the filename contains the sessionId (direct match).
+  // A registered path whose filename doesn't include the sessionId was set via
+  // mtime-based fallback and may be wrong — re-verify by checking the direct path first.
+  const registeredIsDirect = registeredPath != null && basename(registeredPath).includes(sessionId);
+  if (registeredIsDirect && existsSync(registeredPath as string)) return registeredPath as string;
 
   const projectDirName = await findClaudeProjectDir(cwd, sessionId, config);
-  if (!projectDirName) return undefined;
+  if (!projectDirName) {
+    // No project dir found; fall back to mtime-matched registry entry if available
+    if (registeredPath && existsSync(registeredPath)) return registeredPath;
+    return undefined;
+  }
   const projectRoots = getClaudeProjectRoots(config);
 
   for (const projectsDir of projectRoots) {
@@ -151,6 +159,9 @@ export async function resolveClaudeSessionFile(
       return directPath;
     }
   }
+
+  // Direct file not found yet; use mtime-matched registry entry as provisional fallback
+  if (registeredPath && existsSync(registeredPath)) return registeredPath;
 
   if (!startedAt) return undefined;
 
