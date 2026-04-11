@@ -476,11 +476,13 @@ async function readJsonlSessionMeta(
     for (const line of lines) {
       try {
         const entry = JSON.parse(line);
-        if (!meta.sessionId && typeof entry?.sessionId === "string") meta.sessionId = entry.sessionId;
+        if (!meta.sessionId && typeof entry?.sessionId === "string")
+          meta.sessionId = entry.sessionId;
         if (!meta.cwd && typeof entry?.cwd === "string") meta.cwd = entry.cwd;
         if (!meta.timestamp) {
           if (typeof entry?.timestamp === "string") meta.timestamp = entry.timestamp;
-          else if (typeof entry?.snapshot?.timestamp === "string") meta.timestamp = entry.snapshot.timestamp;
+          else if (typeof entry?.snapshot?.timestamp === "string")
+            meta.timestamp = entry.snapshot.timestamp;
         }
         if (meta.sessionId && meta.cwd && meta.timestamp) return meta;
       } catch {
@@ -503,7 +505,10 @@ async function chooseStaleSessionOverride(
   const projectDirName = await findClaudeProjectDir(processCwd, currentSessionId, config);
   if (!projectDirName) return undefined;
 
-  const candidates = await listClaudeSessionCandidates(projectDirName, getClaudeProjectRoots(config));
+  const candidates = await listClaudeSessionCandidates(
+    projectDirName,
+    getClaudeProjectRoots(config),
+  );
   const recentPath = selectRecentSessionFile(candidates);
   if (!recentPath) return undefined;
 
@@ -520,7 +525,10 @@ async function chooseStaleSessionOverride(
 
   if (currentDirectPath) {
     try {
-      const [recentStat, currentStat] = await Promise.all([stat(recentPath), stat(currentDirectPath)]);
+      const [recentStat, currentStat] = await Promise.all([
+        stat(recentPath),
+        stat(currentDirectPath),
+      ]);
       const minLeadMs = 5 * 60 * 1000;
       const staleGapMs = 30 * 60 * 1000;
       if (recentStat.mtimeMs - currentStat.mtimeMs < minLeadMs) return undefined;
@@ -613,16 +621,28 @@ export async function matchClaudeSessionByMtime(
       }
     }
 
-    // Fallback: most recently modified
+    // Fallback: no timestamp-scored match — only commit if one file clearly leads
+    // to avoid mismatching when multiple sessions share the same cwd.
     if (!bestPath) {
       pool.sort((a, b) => b.mtimeMs - a.mtimeMs);
-      bestPath = pool[0].path;
+      const latest = pool[0];
+      const second = pool[1];
+      if (!second || latest.mtimeMs - second.mtimeMs >= 5 * 60 * 1000) {
+        bestPath = latest.path;
+      }
+      // Ambiguous (two recent files within 5 min of each other) → bestPath stays undefined
     }
   } else {
-    // No process start time — pick most recently modified
+    // No process start time — pick most recently modified, but only if unambiguous
     candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
-    bestPath = candidates[0].path;
+    const latest = candidates[0];
+    const second = candidates[1];
+    if (!second || latest.mtimeMs - second.mtimeMs >= 5 * 60 * 1000) {
+      bestPath = candidates[0].path;
+    }
   }
+
+  if (!bestPath) return undefined;
 
   // Read first line for session metadata
   const entry = await readJsonlSessionMeta(bestPath);
