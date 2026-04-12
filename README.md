@@ -275,6 +275,28 @@ tmux badges and terminal text output can share one style via `integration.tmux.b
 - `text` — plain colored text, no filled background
 - `text-mono` — grayscale text only
 
+The currently active tmux pane is also highlighted in the attention pill row so it is easier to see which session belongs to the focused window.
+
+### Alerts
+
+`marmonitor` includes an alert system for important runtime signals such as critical token/context usage and guard-triggered risk events.
+
+Useful commands:
+
+```bash
+marmonitor alerts
+marmonitor alerts on
+marmonitor alerts off
+marmonitor alerts notify on
+marmonitor alerts notify off
+```
+
+Desktop notifications can be enabled separately from alert collection. After changing alert settings, restart the daemon to apply them:
+
+```bash
+marmonitor restart
+```
+
 ## Configuration
 
 Config is loaded from (first found wins):
