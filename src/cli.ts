@@ -11,7 +11,13 @@ import {
   loadConfig,
   resolveConfigPath as resolveLoadedConfigPath,
 } from "./config/index.js";
-import { evaluateGuard, formatGuardOutput, parseHookEvent, readStdin } from "./guard/index.js";
+import {
+  detectGuardTriggers,
+  evaluateGuard,
+  formatGuardOutput,
+  parseHookEvent,
+  readStdin,
+} from "./guard/index.js";
 import {
   applyTerminalStyle,
   printAttention,
@@ -859,6 +865,34 @@ program
         return;
       }
       const result = evaluateGuard(config, event);
+      // Security alert logging is independent of intervention.enabled —
+      // always detect and log dangerous_command / secret_access.
+      const securityTriggers = detectGuardTriggers(event).filter(
+        (t) => t === "dangerous_command" || t === "secret_access",
+      );
+      if (securityTriggers.length > 0) {
+        const { appendAlertLog } = await import("./alerts/index.js");
+        const { getConfigDir } = await import("./config/index.js");
+        const { join } = await import("node:path");
+        const alertsLogPath = join(getConfigDir(), "alerts.log");
+        const agentPid = typeof process.ppid === "number" ? process.ppid : 0;
+        for (const trigger of securityTriggers) {
+          const message =
+            trigger === "secret_access"
+              ? `Credential file access: ${event.filePath ?? "(unknown)"}`
+              : `Dangerous command detected: ${event.command ?? "(unknown)"}`;
+          await appendAlertLog(alertsLogPath, {
+            id: `security:${agentPid}:${Math.floor(Date.now() / 300_000)}`,
+            type: "security",
+            severity: "critical",
+            agentPid,
+            cwd: event.cwd,
+            message,
+            detail: `tool=${event.toolName ?? "?"} trigger=${trigger}`,
+            createdAt: Date.now(),
+          });
+        }
+      }
       console.log(formatGuardOutput(result));
     } catch {
       console.log(JSON.stringify({ decision: "allow" }));
