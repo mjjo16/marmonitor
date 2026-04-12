@@ -5,6 +5,8 @@ export interface TokenUsage {
   cacheCreationTokens: number;
   cacheReadTokens: number;
   totalTokens: number;
+  /** input_tokens from the most recent API response (= current context window size) */
+  lastInputTokens?: number;
 }
 
 /** Agent session status */

@@ -222,6 +222,7 @@ export async function parseClaudeTokens(
     let outputTokens = cached?.result.tokenUsage?.outputTokens ?? 0;
     let cacheCreationTokens = cached?.result.tokenUsage?.cacheCreationTokens ?? 0;
     let cacheReadTokens = cached?.result.tokenUsage?.cacheReadTokens ?? 0;
+    let lastInputTokens: number | undefined = cached?.result.tokenUsage?.lastInputTokens;
     let model: string | undefined = cached?.result.model;
 
     let raw: string;
@@ -238,6 +239,7 @@ export async function parseClaudeTokens(
       outputTokens = 0;
       cacheCreationTokens = 0;
       cacheReadTokens = 0;
+      lastInputTokens = undefined;
       model = undefined;
     }
 
@@ -253,6 +255,10 @@ export async function parseClaudeTokens(
         outputTokens += usage.output_tokens ?? 0;
         cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
         cacheReadTokens += usage.cache_read_input_tokens ?? 0;
+        // Track most recent call's input_tokens for context % calculation
+        if (usage.input_tokens != null) {
+          lastInputTokens = usage.input_tokens;
+        }
 
         if (entry?.message?.model) model = entry.message.model;
       } catch {
@@ -270,6 +276,7 @@ export async function parseClaudeTokens(
               cacheCreationTokens,
               cacheReadTokens,
               totalTokens: inputTokens + outputTokens,
+              lastInputTokens,
             },
       model,
     };
