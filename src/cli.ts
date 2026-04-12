@@ -893,7 +893,7 @@ program
             createdAt: Date.now(),
           };
           await appendAlertLog(alertsLogPath, alert);
-          await sendDesktopNotification(alert);
+          void sendDesktopNotification(alert); // fire-and-forget
         }
       }
       console.log(formatGuardOutput(result));

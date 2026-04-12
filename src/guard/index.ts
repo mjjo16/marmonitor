@@ -26,9 +26,10 @@ export interface GuardDecision {
 }
 
 const DANGEROUS_COMMAND_PATTERNS = [
-  // 루트/홈/전체 강제 삭제
-  /\brm\s+(-\w*f\w*\s+.*-\w*r\w*|-\w*r\w*\s+.*-\w*f\w*)\s+(\/|~|\/\*|\.\.)/, // rm -rf / ~ /* ..
-  /\brm\s+-rf\s+/, // rm -rf (anything — broad catch)
+  // 시스템 경로 대상 강제 삭제만 감지 (./node_modules, ./dist 등 상대경로 제외)
+  // 매치 대상: / (루트) · /etc /usr /var /home /root /bin /sbin /sys /proc /dev /boot · ~ · /*
+  /\brm\s+(-\w*f\w*\s+.*-\w*r\w*|-\w*r\w*\s+.*-\w*f\w*)\s+(\/(\s|$|etc|usr|var|home|root|bin|sbin|sys|proc|dev|boot|lib)|~(\s|$)|\/\*)/,
+  /\brm\s+-rf\s+(\/(\s|$|etc|usr|var|home|root|bin|sbin|sys|proc|dev|boot|lib)|~(\s|$)|\/\*)/, // rm -rf /sys-path
   /\bmkfs\b/, // 파일시스템 포맷
   // sudo + 파괴적 명령
   /\bsudo\s+rm\b/,

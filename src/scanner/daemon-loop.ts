@@ -142,7 +142,7 @@ export async function runDaemonLoop(
         if (alert) {
           await appendAlertLog(alertsLogPath, alert);
           if (alert.severity === "critical") {
-            await sendDesktopNotification(alert);
+            void sendDesktopNotification(alert); // fire-and-forget: 외부 프로세스 spawn이므로 await 금지
           }
         }
       }
