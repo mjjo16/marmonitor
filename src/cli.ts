@@ -865,11 +865,12 @@ program
         return;
       }
       const result = evaluateGuard(config, event);
-      // Security alert logging is independent of intervention.enabled —
-      // always detect and log dangerous_command / secret_access.
-      const securityTriggers = detectGuardTriggers(event).filter(
-        (t) => t === "dangerous_command" || t === "secret_access",
-      );
+      // Security alert: alerts.enabled 확인 후 dangerous_command / secret_access 감지·기록
+      const securityTriggers = config.alerts.enabled
+        ? detectGuardTriggers(event).filter(
+            (t) => t === "dangerous_command" || t === "secret_access",
+          )
+        : [];
       if (securityTriggers.length > 0) {
         const { appendAlertLog } = await import("./alerts/index.js");
         const { getConfigDir } = await import("./config/index.js");
@@ -892,8 +893,8 @@ program
             detail: `tool=${event.toolName ?? "?"} trigger=${trigger}`,
             createdAt: Date.now(),
           };
-          await appendAlertLog(alertsLogPath, alert);
-          void sendDesktopNotification(alert); // fire-and-forget
+          if (config.alerts.log) await appendAlertLog(alertsLogPath, alert);
+          if (config.alerts.desktop) void sendDesktopNotification(alert); // fire-and-forget
         }
       }
       console.log(formatGuardOutput(result));
@@ -901,6 +902,85 @@ program
       console.log(JSON.stringify({ decision: "allow" }));
     }
   });
+
+// ── alerts command ──────────────────────────────────────────────────────────
+
+async function patchAlertsConfig(
+  configPath: string,
+  patch: Partial<{ enabled: boolean; desktop: boolean; log: boolean }>,
+): Promise<void> {
+  await mkdir(dirname(configPath), { recursive: true });
+  let current: Record<string, unknown> = {};
+  try {
+    current = JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
+  } catch {
+    // file missing — start fresh
+  }
+  const alerts = (
+    current.alerts && typeof current.alerts === "object"
+      ? { ...(current.alerts as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  Object.assign(alerts, patch);
+  current.alerts = alerts;
+  await writeFile(configPath, `${JSON.stringify(current, null, 2)}\n`, "utf-8");
+}
+
+const alertsCmd = program
+  .command("alerts")
+  .description("Show or toggle alert settings")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const config = await loadConfig(resolveConfigPath(opts));
+    const a = config.alerts;
+    console.log(`alerts.enabled  : ${a.enabled}`);
+    console.log(`alerts.desktop  : ${a.desktop}`);
+    console.log(`alerts.log      : ${a.log}`);
+    console.log(
+      `alerts.contextCritThreshold: ${a.contextCritThreshold} (${Math.round(a.contextCritThreshold * 100)}%)`,
+    );
+    console.log(
+      `alerts.contextWarnThreshold: ${a.contextWarnThreshold === 1.0 ? "disabled" : `${a.contextWarnThreshold} (${Math.round(a.contextWarnThreshold * 100)}%)`}`,
+    );
+  });
+
+alertsCmd
+  .command("on")
+  .description("Enable alert system")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const p = resolveConfigPath(opts) ?? getDefaultConfigPath();
+    await patchAlertsConfig(p, { enabled: true });
+    console.log("Alerts enabled. Restart daemon to apply: marmonitor restart");
+  });
+
+alertsCmd
+  .command("off")
+  .description("Disable alert system")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const p = resolveConfigPath(opts) ?? getDefaultConfigPath();
+    await patchAlertsConfig(p, { enabled: false });
+    console.log("Alerts disabled. Restart daemon to apply: marmonitor restart");
+  });
+
+alertsCmd
+  .command("notify <on|off>")
+  .description("Toggle desktop notifications")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (toggle, opts) => {
+    if (toggle !== "on" && toggle !== "off") {
+      console.error("Usage: marmonitor alerts notify on|off");
+      process.exit(1);
+    }
+    const p = resolveConfigPath(opts) ?? getDefaultConfigPath();
+    await patchAlertsConfig(p, { desktop: toggle === "on" });
+    console.log(
+      `Desktop notifications ${toggle === "on" ? "enabled" : "disabled"}. Restart daemon to apply: marmonitor restart`,
+    );
+  });
+
+// ── end alerts command ───────────────────────────────────────────────────────
 
 program
   .command("debug-phase")

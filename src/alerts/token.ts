@@ -27,12 +27,15 @@ function contextLimit(model?: string): number {
 }
 
 export interface TokenAlertThresholds {
-  warnAt: number; // e.g. 0.70
-  critAt: number; // e.g. 0.85
+  /** 경고 임계값 (0~1). 1.0이면 비활성화. */
+  warnAt: number;
+  /** 위험 임계값 (0~1). */
+  critAt: number;
 }
 
+/** Phase 1 기본값: warn 비활성(1.0), crit 85% */
 export const DEFAULT_TOKEN_THRESHOLDS: TokenAlertThresholds = {
-  warnAt: 0.7,
+  warnAt: 1.0,
   critAt: 0.85,
 };
 

@@ -136,13 +136,19 @@ export async function runDaemonLoop(
       // Write snapshot for statusline consumers
       await writeDaemonSnapshot(snapshotPath, agents);
 
-      // Check token thresholds and fire alerts
-      for (const agent of agents) {
-        const alert = checkTokenAlert(alertStore, agent);
-        if (alert) {
-          await appendAlertLog(alertsLogPath, alert);
-          if (alert.severity === "critical") {
-            void sendDesktopNotification(alert); // fire-and-forget: 외부 프로세스 spawn이므로 await 금지
+      // Check token thresholds and fire alerts (alerts.enabled 확인)
+      if (config.alerts.enabled) {
+        const thresholds = {
+          warnAt: config.alerts.contextWarnThreshold,
+          critAt: config.alerts.contextCritThreshold,
+        };
+        for (const agent of agents) {
+          const alert = checkTokenAlert(alertStore, agent, thresholds);
+          if (alert) {
+            if (config.alerts.log) await appendAlertLog(alertsLogPath, alert);
+            if (config.alerts.desktop && alert.severity === "critical") {
+              void sendDesktopNotification(alert); // fire-and-forget
+            }
           }
         }
       }
