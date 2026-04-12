@@ -681,6 +681,7 @@ export async function renderStatusline(
   width?: number,
   badgeStyle: BadgeStyle = "basic",
   hasJumpAnchor = false,
+  activeAgentPid?: number,
 ): Promise<string> {
   const alive = agents.filter((a) => a.status !== "Dead" && a.status !== "Unmatched");
   const unmatched = agents.filter((a) => a.status === "Unmatched");
@@ -722,6 +723,7 @@ export async function renderStatusline(
       attentionLimit,
       width,
       badgeStyle,
+      activeAgentPid,
     );
     return buildTmuxBadgeBar(snapshot, focusText, badgeStyle, hasJumpAnchor);
   }

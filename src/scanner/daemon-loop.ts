@@ -5,6 +5,13 @@
 
 import { open, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  AlertStore,
+  appendAlertLog,
+  checkTokenAlert,
+  sendDesktopNotification,
+  writeAlertsSnapshot,
+} from "../alerts/index.js";
 import type { MarmonitorConfig } from "../config/index.js";
 import {
   type ActivityEntry,
@@ -35,6 +42,8 @@ export interface DaemonOptions {
   intervalMs: number;
   detailIntervalMs: number;
   snapshotPath: string;
+  alertsSnapshotPath: string;
+  alertsLogPath: string;
   pidPath: string;
   registryPath: string;
   codexBindingRegistryPath: string;
@@ -54,6 +63,8 @@ export async function runDaemonLoop(
     intervalMs,
     detailIntervalMs,
     snapshotPath,
+    alertsSnapshotPath,
+    alertsLogPath,
     pidPath,
     registryPath,
     codexBindingRegistryPath,
@@ -64,6 +75,8 @@ export async function runDaemonLoop(
   // Activity log: per-session JSONL cursor offsets (in-memory only)
   const activityCursors = new Map<string, number>();
   let lastActivityCleanupAt = 0;
+
+  const alertStore = new AlertStore();
 
   await writeDaemonPid(pidPath, process.pid);
 
@@ -122,6 +135,24 @@ export async function runDaemonLoop(
 
       // Write snapshot for statusline consumers
       await writeDaemonSnapshot(snapshotPath, agents);
+
+      // Check token thresholds and fire alerts (alerts.enabled 확인)
+      if (config.alerts.enabled) {
+        const thresholds = {
+          warnAt: config.alerts.contextWarnThreshold,
+          critAt: config.alerts.contextCritThreshold,
+        };
+        for (const agent of agents) {
+          const alert = checkTokenAlert(alertStore, agent, thresholds);
+          if (alert) {
+            if (config.alerts.log) await appendAlertLog(alertsLogPath, alert);
+            if (config.alerts.desktop && alert.severity === "critical") {
+              void sendDesktopNotification(alert); // fire-and-forget
+            }
+          }
+        }
+      }
+      await writeAlertsSnapshot(alertsSnapshotPath, alertStore.active());
 
       // Save registry periodically (on heavy scan) + prune old entries
       if (needsHeavy) {

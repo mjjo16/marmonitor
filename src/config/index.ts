@@ -95,6 +95,18 @@ export interface MarmonitorConfig {
     daemonIntervalSec: number;
     activityRetentionDays: number;
   };
+  alerts: {
+    /** 알림 시스템 마스터 토글 */
+    enabled: boolean;
+    /** macOS/Linux 데스크탑 알림 */
+    desktop: boolean;
+    /** alerts.log 파일 기록 */
+    log: boolean;
+    /** 컨텍스트 경고 임계값 (0~1). 0 = 비활성화. 기본 1.0 (비활성) */
+    contextWarnThreshold: number;
+    /** 컨텍스트 위험 임계값 (0~1). 기본 0.85 */
+    contextCritThreshold: number;
+  };
 }
 
 const DEFAULTS: MarmonitorConfig = {
@@ -177,6 +189,13 @@ const DEFAULTS: MarmonitorConfig = {
     stdoutHeuristicTtlMs: 2000,
     daemonIntervalSec: 2,
     activityRetentionDays: 7,
+  },
+  alerts: {
+    enabled: true,
+    desktop: true,
+    log: true,
+    contextWarnThreshold: 1.0, // 기본 비활성 (0.70으로 설정 시 활성화)
+    contextCritThreshold: 0.85,
   },
 };
 

@@ -11,7 +11,13 @@ import {
   loadConfig,
   resolveConfigPath as resolveLoadedConfigPath,
 } from "./config/index.js";
-import { evaluateGuard, formatGuardOutput, parseHookEvent, readStdin } from "./guard/index.js";
+import {
+  detectGuardTriggers,
+  evaluateGuard,
+  formatGuardOutput,
+  parseHookEvent,
+  readStdin,
+} from "./guard/index.js";
 import {
   applyTerminalStyle,
   printAttention,
@@ -44,7 +50,12 @@ import { parseGeminiSession } from "./scanner/gemini.js";
 import { scanAgents } from "./scanner/index.js";
 import { loadRegistryFromFile } from "./scanner/session-registry.js";
 import { detectCliStdoutPhase } from "./scanner/status.js";
-import { captureTmuxPaneOutput, jumpToAgent, resolveTmuxJumpTarget } from "./tmux/index.js";
+import {
+  captureTmuxPaneOutput,
+  findActiveAgentPid,
+  jumpToAgent,
+  resolveTmuxJumpTarget,
+} from "./tmux/index.js";
 import { getClientTty, jumpBack } from "./tmux/jump-anchor.js";
 import { findClickedAgent, parseStatusClickToken } from "./tmux/status-click.js";
 import type { AgentSession } from "./types.js";
@@ -499,17 +510,28 @@ function statuslineCacheFile(format: string, attentionLimit: number, width?: num
   return join(tmpdir(), "marmonitor", `statusline-${format}-${attentionLimit}-${widthKey}.txt`);
 }
 
+/** Read cached statusline. When activePanePid is provided, the cache is
+ *  only valid if the stored panePid (first line) matches — otherwise the
+ *  active-window highlight would be stale. Returns {content, panePid}. */
 async function readCachedStatusline(
   format: string,
   attentionLimit: number,
   width: number | undefined,
   ttlMs: number,
-): Promise<string | undefined> {
+): Promise<{ content: string; panePid: number | undefined } | undefined> {
   const path = statuslineCacheFile(format, attentionLimit, width);
   try {
     const fileStat = await stat(path);
     if (Date.now() - fileStat.mtimeMs > ttlMs) return undefined;
-    return (await readFile(path, "utf-8")).trimEnd();
+    const raw = (await readFile(path, "utf-8")).trimEnd();
+    const newline = raw.indexOf("\n");
+    if (newline === -1) return { content: raw, panePid: undefined };
+    const firstLine = raw.slice(0, newline);
+    const pid = Number.parseInt(firstLine, 10);
+    if (Number.isFinite(pid)) {
+      return { content: raw.slice(newline + 1), panePid: pid };
+    }
+    return { content: raw, panePid: undefined };
   } catch {
     return undefined;
   }
@@ -520,11 +542,13 @@ async function writeCachedStatusline(
   attentionLimit: number,
   width: number | undefined,
   value: string,
+  activePanePid?: number,
 ): Promise<void> {
   const path = statuslineCacheFile(format, attentionLimit, width);
+  const data = activePanePid ? `${activePanePid}\n${value}` : value;
   try {
     await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
-    await writeFile(path, value, "utf-8");
+    await writeFile(path, data, "utf-8");
   } catch {
     // cache failures must never break statusline rendering
   }
@@ -580,6 +604,10 @@ program
         }
         const attentionLimit = config.display.statuslineAttentionLimit;
         const width = resolveStatuslineWidth(opts.width);
+        const isTmuxBadges = opts.statuslineFormat === "tmux-badges";
+        // Try cache first. For tmux-badges the cached panePid is checked
+        // against the live pane only on cache hit — the tmux call is
+        // deferred so cache-miss paths pay for it just once.
         const cached = await readCachedStatusline(
           opts.statuslineFormat,
           attentionLimit,
@@ -587,21 +615,38 @@ program
           config.performance.statuslineTtlMs,
         );
         if (cached) {
-          console.log(cached);
-          return;
+          if (isTmuxBadges && cached.panePid !== undefined) {
+            const { getActiveTmuxPanePid } = await import("./tmux/index.js");
+            const currentPanePid = await getActiveTmuxPanePid();
+            if (currentPanePid !== cached.panePid) {
+              // Active pane changed — fall through to re-render
+            } else {
+              console.log(cached.content);
+              return;
+            }
+          } else {
+            console.log(cached.content);
+            return;
+          }
         }
         const agents = await getAgentsSnapshot();
         if (agents.length === 0) {
           console.log(renderUnavailableStatusline(opts.statuslineFormat));
           return;
         }
-        // Check jump-back anchor for indicator
+        // Check jump-back anchor and resolve active agent for tmux-badges
         let hasJumpAnchor = false;
-        if (opts.statuslineFormat === "tmux-badges") {
+        let activeAgentPid: number | undefined;
+        let activePanePid: number | undefined;
+        if (isTmuxBadges) {
           const { tmpdir: td } = await import("node:os");
           const { join: pj } = await import("node:path");
           const { loadJumpAnchor } = await import("./tmux/jump-anchor.js");
-          const tty = await getClientTty();
+          const { getActiveTmuxPanePid } = await import("./tmux/index.js");
+          const agentPids = agents.map((a) => a.pid);
+          const [tty, panePid] = await Promise.all([getClientTty(), getActiveTmuxPanePid()]);
+          activePanePid = panePid;
+          activeAgentPid = await findActiveAgentPid(agentPids, activePanePid);
           if (tty) {
             hasJumpAnchor = Boolean(
               await loadJumpAnchor(pj(td(), "marmonitor", "jump-anchors.json"), tty),
@@ -615,8 +660,15 @@ program
           width,
           config.integration.tmux.badgeStyle,
           hasJumpAnchor,
+          activeAgentPid,
         );
-        await writeCachedStatusline(opts.statuslineFormat, attentionLimit, width, rendered);
+        await writeCachedStatusline(
+          opts.statuslineFormat,
+          attentionLimit,
+          width,
+          rendered,
+          activePanePid,
+        );
         console.log(rendered);
         return;
       } catch {
@@ -813,11 +865,122 @@ program
         return;
       }
       const result = evaluateGuard(config, event);
+      // Security alert: alerts.enabled 확인 후 dangerous_command / secret_access 감지·기록
+      const securityTriggers = config.alerts.enabled
+        ? detectGuardTriggers(event).filter(
+            (t) => t === "dangerous_command" || t === "secret_access",
+          )
+        : [];
+      if (securityTriggers.length > 0) {
+        const { appendAlertLog } = await import("./alerts/index.js");
+        const { getConfigDir } = await import("./config/index.js");
+        const { join } = await import("node:path");
+        const alertsLogPath = join(getConfigDir(), "alerts.log");
+        const { sendDesktopNotification } = await import("./alerts/index.js");
+        const agentPid = typeof process.ppid === "number" ? process.ppid : 0;
+        for (const trigger of securityTriggers) {
+          const message =
+            trigger === "secret_access"
+              ? `Credential file access: ${event.filePath ?? "(unknown)"}`
+              : `Dangerous command detected: ${event.command ?? "(unknown)"}`;
+          const alert = {
+            id: `security:${agentPid}:${Math.floor(Date.now() / 300_000)}`,
+            type: "security" as const,
+            severity: "critical" as const,
+            agentPid,
+            cwd: event.cwd,
+            message,
+            detail: `tool=${event.toolName ?? "?"} trigger=${trigger}`,
+            createdAt: Date.now(),
+          };
+          if (config.alerts.log) await appendAlertLog(alertsLogPath, alert);
+          if (config.alerts.desktop) void sendDesktopNotification(alert); // fire-and-forget
+        }
+      }
       console.log(formatGuardOutput(result));
     } catch {
       console.log(JSON.stringify({ decision: "allow" }));
     }
   });
+
+// ── alerts command ──────────────────────────────────────────────────────────
+
+async function patchAlertsConfig(
+  configPath: string,
+  patch: Partial<{ enabled: boolean; desktop: boolean; log: boolean }>,
+): Promise<void> {
+  await mkdir(dirname(configPath), { recursive: true });
+  let current: Record<string, unknown> = {};
+  try {
+    current = JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
+  } catch {
+    // file missing — start fresh
+  }
+  const alerts = (
+    current.alerts && typeof current.alerts === "object"
+      ? { ...(current.alerts as Record<string, unknown>) }
+      : {}
+  ) as Record<string, unknown>;
+  Object.assign(alerts, patch);
+  current.alerts = alerts;
+  await writeFile(configPath, `${JSON.stringify(current, null, 2)}\n`, "utf-8");
+}
+
+const alertsCmd = program
+  .command("alerts")
+  .description("Show or toggle alert settings")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const config = await loadConfig(resolveConfigPath(opts));
+    const a = config.alerts;
+    console.log(`alerts.enabled  : ${a.enabled}`);
+    console.log(`alerts.desktop  : ${a.desktop}`);
+    console.log(`alerts.log      : ${a.log}`);
+    console.log(
+      `alerts.contextCritThreshold: ${a.contextCritThreshold} (${Math.round(a.contextCritThreshold * 100)}%)`,
+    );
+    console.log(
+      `alerts.contextWarnThreshold: ${a.contextWarnThreshold === 1.0 ? "disabled" : `${a.contextWarnThreshold} (${Math.round(a.contextWarnThreshold * 100)}%)`}`,
+    );
+  });
+
+alertsCmd
+  .command("on")
+  .description("Enable alert system")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const p = resolveConfigPath(opts) ?? getDefaultConfigPath();
+    await patchAlertsConfig(p, { enabled: true });
+    console.log("Alerts enabled. Restart daemon to apply: marmonitor restart");
+  });
+
+alertsCmd
+  .command("off")
+  .description("Disable alert system")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const p = resolveConfigPath(opts) ?? getDefaultConfigPath();
+    await patchAlertsConfig(p, { enabled: false });
+    console.log("Alerts disabled. Restart daemon to apply: marmonitor restart");
+  });
+
+alertsCmd
+  .command("notify <on|off>")
+  .description("Toggle desktop notifications")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (toggle, opts) => {
+    if (toggle !== "on" && toggle !== "off") {
+      console.error("Usage: marmonitor alerts notify on|off");
+      process.exit(1);
+    }
+    const p = resolveConfigPath(opts) ?? getDefaultConfigPath();
+    await patchAlertsConfig(p, { desktop: toggle === "on" });
+    console.log(
+      `Desktop notifications ${toggle === "on" ? "enabled" : "disabled"}. Restart daemon to apply: marmonitor restart`,
+    );
+  });
+
+// ── end alerts command ───────────────────────────────────────────────────────
 
 program
   .command("debug-phase")
@@ -1394,10 +1557,21 @@ program
     console.log("  $ rm -rf ~/.tmux/plugins/marmonitor-tmux  # tpm plugin");
   });
 
+/** Find all running marmonitor daemon PIDs (excludes current CLI process) */
+async function findRunningDaemonPids(): Promise<number[]> {
+  try {
+    const { default: psList } = await import("ps-list");
+    const procs = await psList();
+    return procs.filter((p) => p.name === "marmonitor" && p.pid !== process.pid).map((p) => p.pid);
+  } catch {
+    return [];
+  }
+}
+
 async function startDaemon(): Promise<number | undefined> {
-  if (await isDaemonRunning(DAEMON_PID_PATH)) {
-    const pid = await readDaemonPid(DAEMON_PID_PATH);
-    console.log(`Daemon already running (PID: ${pid})`);
+  const running = await findRunningDaemonPids();
+  if (running.length > 0) {
+    console.log(`Daemon already running (PID: ${running[0]})`);
     return undefined;
   }
   const { fork } = await import("node:child_process");
@@ -1410,13 +1584,38 @@ async function startDaemon(): Promise<number | undefined> {
 }
 
 async function stopDaemon(): Promise<boolean> {
-  const pid = await readDaemonPid(DAEMON_PID_PATH);
-  if (!pid || !(await isDaemonRunning(DAEMON_PID_PATH))) {
+  const pids = await findRunningDaemonPids();
+  if (pids.length === 0) {
     console.log("Daemon is not running.");
     return false;
   }
-  process.kill(pid, "SIGTERM");
-  console.log(`✓ Daemon stopped (PID: ${pid})`);
+  // Send SIGTERM to all running daemon processes (handles orphans)
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+  }
+  // Poll until all processes die (up to 2s)
+  let remaining = [...pids];
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    remaining = remaining.filter((pid) => {
+      try {
+        process.kill(pid, 0);
+        return true; // still alive
+      } catch {
+        return false; // dead
+      }
+    });
+    if (remaining.length === 0) break;
+  }
+  // Fallback: SIGKILL any survivors
+  for (const pid of remaining) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {}
+  }
+  console.log(`✓ Daemon stopped (PID: ${pids.join(", ")})`);
   return true;
 }
 
@@ -1441,7 +1640,6 @@ program
   .description("Restart background scan daemon")
   .action(async () => {
     await stopDaemon();
-    await new Promise((r) => setTimeout(r, 500));
     await startDaemon();
     process.exit(0);
   });

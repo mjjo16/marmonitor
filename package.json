@@ -1,6 +1,6 @@
 {
   "name": "marmonitor",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "author": "MJ JO <mjjo16@gmail.com>",
   "description": "tmux status bar monitor for AI coding agents — track Claude Code, Codex, Gemini sessions, tokens, and phases in real time",
   "type": "module",
@@ -55,6 +55,7 @@
   "dependencies": {
     "chalk": "^5.3",
     "commander": "^12.1",
+    "node-notifier": "^10.0.1",
     "pidusage": "^3.0",
     "ps-list": "^8.1",
     "systeminformation": "^5.22"
@@ -62,6 +63,7 @@
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
     "@types/node": "^20.14",
+    "@types/node-notifier": "^8.0.5",
     "@types/pidusage": "^2.0.5",
     "typescript": "^5.5"
   },

@@ -1,5 +1,11 @@
 import type { AgentSession, SessionPhase } from "../types.js";
-import { renderAttention, renderBadge, renderFocus, resolveTheme } from "./badge-themes.js";
+import {
+  renderAttention,
+  renderAttentionActive,
+  renderBadge,
+  renderFocus,
+  resolveTheme,
+} from "./badge-themes.js";
 
 /**
  * Pure utility functions for marmonitor.
@@ -266,6 +272,7 @@ export interface SessionRegistryEntry {
   startedAt?: number;
   model?: string;
   source: "claude" | "codex";
+  binding: "direct" | "provisional";
 }
 
 export interface SessionFileCandidate {
@@ -404,7 +411,10 @@ export function upsertSessionRegistryEntry(
   registry: Map<string, SessionRegistryEntry>,
   entry: SessionRegistryEntry,
 ): void {
-  registry.set(entry.sessionId, entry);
+  registry.set(entry.sessionId, {
+    ...entry,
+    binding: entry.binding ?? "provisional",
+  });
 }
 
 export function selectRecentSessionFile(
@@ -814,6 +824,7 @@ export function buildTmuxAttentionPills(
   maxCount = 5,
   width?: number,
   badgeStyle: BadgeStyle = "basic",
+  activeAgentPid?: number,
 ): string | undefined {
   if (maxCount <= 0) return undefined;
   const layout = resolveStatuslineDetailLayout(width, maxCount);
@@ -852,9 +863,11 @@ export function buildTmuxAttentionPills(
               : time
                 ? `⚠${agent} ${path} ${time}`
                 : `⚠${agent} ${path}`;
+    const isActive = activeAgentPid !== undefined && item.pid === activeAgentPid;
+    const render = isActive ? renderAttentionActive : renderAttention;
     return tmuxUserRange(
       `pid:${item.pid}`,
-      renderAttention(theme, index + 1, label, attentionBg(item.kind)),
+      render(theme, index + 1, label, attentionBg(item.kind)),
     );
   });
 

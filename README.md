@@ -63,6 +63,55 @@ Running multiple AI coding agents in tmux is now the norm — Claude Code refact
 
 > **Built for the tmux + AI multi-session workflow.** If you run 5+ AI coding sessions daily across different projects, marmonitor turns context-switching from guesswork into a glance at your status bar.
 
+<details>
+<summary><h3>🔩 Under the hood: Agent Session Binding</h3></summary>
+
+### The problem
+
+None of the major AI coding agents expose an external API for session introspection. There's no `claude sessions list`, no webhook when a session changes state. To show you live token counts, phase, and `lastResponseAt`, marmonitor has to read and interpret each agent's internal data formats — which are completely different across agents, undocumented, and subject to change.
+
+But the harder problem isn't parsing files. It's **reliably binding a live OS process to the right session file** — and keeping that binding correct as sessions evolve.
+
+### Why binding is hard
+
+A naïve approach — "find the agent process, read the newest session file" — breaks under common real-world conditions:
+
+- **`/clear` in Claude Code** creates a new session UUID and a new JSONL file while the PID stays the same. Without re-mapping, marmonitor would keep reading the old file and report stale tokens and a frozen `lastResponseAt`.
+- **Stale PID metadata** — Claude writes `~/.claude/sessions/{pid}.json` with the current session ID, but after `/clear` this file can lag behind the actual new session for a window of time.
+- **Multiple sessions sharing a cwd** — when you run two Claude sessions in the same project directory, mtime-based file selection silently picks the wrong JSONL, misattributing one session's activity to another.
+- **Delayed file creation** — a session file may not exist on disk yet when the process is first detected, requiring provisional binding with promotion once the file appears.
+
+Any of these failures corrupts downstream metrics: token usage, phase detection, and `lastResponseAt` all read from the bound file.
+
+### The binding pipeline
+
+For every detected agent process, marmonitor resolves a chain of five steps:
+
+```
+PID
+ └─ Identity Resolver     → session identity (sessionId or thread index)
+     └─ File Binding       → session file path  (direct or provisional)
+         └─ Reconciliation → stale/clear correction when needed
+             └─ Binding Cache    → in-memory, current binding only
+                 └─ Binding History  → disk registry, per-session accumulation
+```
+
+Each agent traverses this chain differently:
+
+| | Identity Resolver | File Binding | Reconciliation |
+|--|--|--|--|
+| **Claude Code** | `~/.claude/sessions/{pid}.json` → `sessionId` | `{sessionId}.jsonl` (direct) or mtime-proximity match (provisional) | `chooseStaleSessionOverride()` detects `/clear` and stale pid metadata |
+| **Codex** | `cwd + processStartedAt` matched against SQLite thread index | Rollout JSONL or SQLite row, via binding registry keyed on `pid + processStartedAt` | Freshness correction via binding registry TTL |
+| **Gemini** | `cwd` → resolved project dir under `~/.gemini/tmp/` | Latest `chats/session-*.json` by mtime | Lightweight — single active session per project dir |
+
+### Why this matters
+
+The binding layer is what makes the numbers in your status bar trustworthy. A `direct` binding means the file path was confirmed from session metadata — marmonitor won't swap it without evidence. A `provisional` binding is held until a direct file appears, then promoted automatically. Reconciliation only overrides when specific conditions are met (mtime lead, metadata confirmation, active file guard) — not on every scan.
+
+This design is also the reason marmonitor can correctly track sessions across `/clear`, restarts, and parallel sessions in the same project — scenarios where simpler monitors silently fall back to wrong data.
+
+</details>
+
 ## Supported Agents
 
 | Agent | Detection | Session Enrichment | Phase Tracking |
@@ -225,6 +274,28 @@ tmux badges and terminal text output can share one style via `integration.tmux.b
 - `block-mono` — monochrome filled badges without Powerline separator glyphs
 - `text` — plain colored text, no filled background
 - `text-mono` — grayscale text only
+
+The currently active tmux pane is also highlighted in the attention pill row so it is easier to see which session belongs to the focused window.
+
+### Alerts
+
+`marmonitor` includes an alert system for important runtime signals such as critical token/context usage and guard-triggered risk events.
+
+Useful commands:
+
+```bash
+marmonitor alerts
+marmonitor alerts on
+marmonitor alerts off
+marmonitor alerts notify on
+marmonitor alerts notify off
+```
+
+Desktop notifications can be enabled separately from alert collection. After changing alert settings, restart the daemon to apply them:
+
+```bash
+marmonitor restart
+```
 
 ## Configuration
 

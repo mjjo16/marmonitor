@@ -21,6 +21,8 @@ async function main(): Promise<void> {
     intervalMs: intervalSec * 1000,
     detailIntervalMs: 30_000,
     snapshotPath: join(DAEMON_DIR, "daemon-snapshot.json"),
+    alertsSnapshotPath: join(DAEMON_DIR, "alerts-snapshot.json"),
+    alertsLogPath: join(CONFIG_DIR, "alerts.log"),
     pidPath: join(DAEMON_DIR, "daemon.pid"),
     registryPath: join(CONFIG_DIR, "session-registry.json"),
     codexBindingRegistryPath: join(CONFIG_DIR, "codex-binding-registry.json"),
