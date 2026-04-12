@@ -875,22 +875,25 @@ program
         const { getConfigDir } = await import("./config/index.js");
         const { join } = await import("node:path");
         const alertsLogPath = join(getConfigDir(), "alerts.log");
+        const { sendDesktopNotification } = await import("./alerts/index.js");
         const agentPid = typeof process.ppid === "number" ? process.ppid : 0;
         for (const trigger of securityTriggers) {
           const message =
             trigger === "secret_access"
               ? `Credential file access: ${event.filePath ?? "(unknown)"}`
               : `Dangerous command detected: ${event.command ?? "(unknown)"}`;
-          await appendAlertLog(alertsLogPath, {
+          const alert = {
             id: `security:${agentPid}:${Math.floor(Date.now() / 300_000)}`,
-            type: "security",
-            severity: "critical",
+            type: "security" as const,
+            severity: "critical" as const,
             agentPid,
             cwd: event.cwd,
             message,
             detail: `tool=${event.toolName ?? "?"} trigger=${trigger}`,
             createdAt: Date.now(),
-          });
+          };
+          await appendAlertLog(alertsLogPath, alert);
+          await sendDesktopNotification(alert);
         }
       }
       console.log(formatGuardOutput(result));

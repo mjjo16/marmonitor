@@ -9,6 +9,7 @@ import {
   AlertStore,
   appendAlertLog,
   checkTokenAlert,
+  sendDesktopNotification,
   writeAlertsSnapshot,
 } from "../alerts/index.js";
 import type { MarmonitorConfig } from "../config/index.js";
@@ -140,6 +141,9 @@ export async function runDaemonLoop(
         const alert = checkTokenAlert(alertStore, agent);
         if (alert) {
           await appendAlertLog(alertsLogPath, alert);
+          if (alert.severity === "critical") {
+            await sendDesktopNotification(alert);
+          }
         }
       }
       await writeAlertsSnapshot(alertsSnapshotPath, alertStore.active());
