@@ -2,6 +2,17 @@
 
 All notable changes to marmonitor are documented here.
 
+## [0.2.5] - 2026-04-12
+
+### Added
+- **Active tmux window highlight** in statusline attention pills so the currently focused agent session is visually distinguished.
+- **Alert system foundation** with alert types, storage, logging, snapshot support, and token threshold tracking.
+- **Alert CLI controls**: `marmonitor alerts`, `marmonitor alerts on|off`, and `marmonitor alerts notify on|off`.
+- **Desktop notifications** for critical alerts via `node-notifier`.
+
+### Fixed
+- `marmonitor restart` now waits for daemon shutdown more reliably to avoid leaving duplicate daemon processes behind.
+
 ## [0.2.4] - 2026-04-08
 
 ### Added
