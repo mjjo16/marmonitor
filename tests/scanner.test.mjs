@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { getDefaults } from "../dist/config/index.js";
 import { setCodexIndexCache } from "../dist/scanner/cache.js";
-import { indexCodexSessions } from "../dist/scanner/codex.js";
+import { indexCodexSessions, mergeCodexIndexedSessions } from "../dist/scanner/codex.js";
 import {
   detectAgentFromProcessSignature,
   parseGeminiSessionContent,
@@ -249,6 +249,67 @@ describe("propagateWorkerStateToParent", () => {
 });
 
 describe("indexCodexSessions", () => {
+  it("merges sqlite and jsonl Codex sessions so fresh rollout-only sessions are preserved", () => {
+    const merged = mergeCodexIndexedSessions(
+      [
+        {
+          id: "sqlite-only",
+          cwd: "/tmp/sqlite-only",
+          filePath: "/tmp/sqlite-only.jsonl",
+          timestamp: 100,
+          lastActivityAt: 130,
+        },
+        {
+          id: "shared",
+          cwd: "/tmp/shared",
+          filePath: "/tmp/shared-sqlite.jsonl",
+          timestamp: 200,
+          lastActivityAt: 220,
+          totalTokenUsage: {
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 10,
+          },
+        },
+      ],
+      [
+        {
+          id: "shared",
+          cwd: "/tmp/shared",
+          filePath: "/tmp/shared-jsonl.jsonl",
+          timestamp: 180,
+          lastActivityAt: 240,
+          totalTokenUsage: {
+            input_tokens: 11,
+            cached_input_tokens: 2,
+            output_tokens: 3,
+            total_tokens: 16,
+          },
+          model: "gpt-5.4",
+        },
+        {
+          id: "jsonl-only",
+          cwd: "/tmp/jsonl-only",
+          filePath: "/tmp/jsonl-only.jsonl",
+          timestamp: 300,
+          lastActivityAt: 310,
+        },
+      ],
+    );
+
+    assert.deepEqual(
+      merged.map((session) => session.id),
+      ["jsonl-only", "shared", "sqlite-only"],
+    );
+    assert.equal(merged.find((session) => session.id === "shared")?.filePath, "/tmp/shared-jsonl.jsonl");
+    assert.equal(merged.find((session) => session.id === "shared")?.timestamp, 180);
+    assert.equal(
+      merged.find((session) => session.id === "shared")?.totalTokenUsage?.total_tokens,
+      16,
+    );
+  });
+
   it("records lastActivityAt from the session file mtime", async () => {
     const now = new Date();
     const yyyy = now.getFullYear().toString();

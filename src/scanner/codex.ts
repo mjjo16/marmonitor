@@ -35,6 +35,43 @@ export type { CodexSessionMeta } from "./cache.js";
 
 const CODEX_SQLITE_RECENT_DAYS = 7;
 
+function mergeCodexIndexedSessions(
+  baseSessions: CodexSessionMeta[],
+  incomingSessions: CodexSessionMeta[],
+): CodexSessionMeta[] {
+  const merged = new Map<string, CodexSessionMeta>();
+
+  for (const session of baseSessions) {
+    merged.set(session.id, session);
+  }
+
+  for (const session of incomingSessions) {
+    const existing = merged.get(session.id);
+    if (!existing) {
+      merged.set(session.id, session);
+      continue;
+    }
+
+    merged.set(session.id, {
+      ...existing,
+      ...session,
+      filePath: session.filePath || existing.filePath,
+      cwd: session.cwd || existing.cwd,
+      timestamp: Math.min(existing.timestamp || session.timestamp, session.timestamp || existing.timestamp),
+      lastActivityAt: Math.max(existing.lastActivityAt ?? 0, session.lastActivityAt ?? 0) || undefined,
+      totalTokenUsage:
+        session.totalTokenUsage?.total_tokens !== undefined
+          ? session.totalTokenUsage
+          : existing.totalTokenUsage,
+      model: session.model ?? existing.model,
+    });
+  }
+
+  return [...merged.values()].sort((a, b) => (b.lastActivityAt ?? b.timestamp) - (a.lastActivityAt ?? a.timestamp));
+}
+
+export { mergeCodexIndexedSessions };
+
 export function getCodexSessionRoots(config?: MarmonitorConfig): string[] {
   return config
     ? resolveRuntimeDataPaths(config).codexSessions
@@ -174,16 +211,18 @@ export async function indexCodexSessions(
 
   const hasExplicitSessionRoots = Boolean(config?.paths.codexSessions?.length);
 
+  const sqliteSessions: CodexSessionMeta[] = [];
+
   // Primary: SQLite threads table
   const dbPath = hasExplicitSessionRoots ? undefined : findCodexStateDb();
   if (dbPath) {
-    const sqliteSessions = await indexCodexSessionsFromSqlite(dbPath, {
+    const indexed = await indexCodexSessionsFromSqlite(dbPath, {
       recentUpdatedAfter: Math.floor(Date.now() / 1000) - CODEX_SQLITE_RECENT_DAYS * 86400,
       includeCwds: activeCwds,
     });
-    if (sqliteSessions.length > 0) {
+    if (indexed.length > 0) {
       // Register sessions for phase detection and cwd lookup
-      for (const s of sqliteSessions) {
+      for (const s of indexed) {
         codexSessionFileCache.set(s.filePath, { ...s, mtimeMs: undefined, size: undefined });
         upsertSessionRegistryEntry(codexSessionRegistry, {
           filePath: s.filePath,
@@ -196,10 +235,7 @@ export async function indexCodexSessions(
           binding: "direct",
         });
       }
-      if (!hasTargetedFilter) {
-        setCodexIndexCache({ builtAt: Date.now(), sessions: sqliteSessions });
-      }
-      return sqliteSessions;
+      sqliteSessions.push(...indexed);
     }
   }
 
@@ -272,6 +308,9 @@ export async function indexCodexSessions(
             }
 
             if (meta.id && meta.cwd && meta.timestamp) {
+              if (hasTargetedFilter && !activeCwds.includes(meta.cwd)) {
+                continue;
+              }
               const parsed = {
                 filePath,
                 id: meta.id,
@@ -306,11 +345,13 @@ export async function indexCodexSessions(
     // sessions dir error
   }
 
+  const sessions = mergeCodexIndexedSessions(sqliteSessions, metas);
+
   setCodexIndexCache({
     builtAt: Date.now(),
-    sessions: metas,
+    sessions,
   });
-  return metas;
+  return sessions;
 }
 
 /** Match a Codex process to a session by cwd + closest timestamp */
