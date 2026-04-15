@@ -191,9 +191,9 @@ const DEFAULTS: MarmonitorConfig = {
     activityRetentionDays: 7,
   },
   alerts: {
-    enabled: true,
-    desktop: true,
-    log: true,
+    enabled: false,
+    desktop: false,
+    log: false,
     contextWarnThreshold: 1.0, // 기본 비활성 (0.70으로 설정 시 활성화)
     contextCritThreshold: 0.85,
   },
