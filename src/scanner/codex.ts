@@ -57,8 +57,12 @@ function mergeCodexIndexedSessions(
       ...session,
       filePath: session.filePath || existing.filePath,
       cwd: session.cwd || existing.cwd,
-      timestamp: Math.min(existing.timestamp || session.timestamp, session.timestamp || existing.timestamp),
-      lastActivityAt: Math.max(existing.lastActivityAt ?? 0, session.lastActivityAt ?? 0) || undefined,
+      timestamp: Math.min(
+        existing.timestamp || session.timestamp,
+        session.timestamp || existing.timestamp,
+      ),
+      lastActivityAt:
+        Math.max(existing.lastActivityAt ?? 0, session.lastActivityAt ?? 0) || undefined,
       totalTokenUsage:
         session.totalTokenUsage?.total_tokens !== undefined
           ? session.totalTokenUsage
@@ -67,7 +71,9 @@ function mergeCodexIndexedSessions(
     });
   }
 
-  return [...merged.values()].sort((a, b) => (b.lastActivityAt ?? b.timestamp) - (a.lastActivityAt ?? a.timestamp));
+  return [...merged.values()].sort(
+    (a, b) => (b.lastActivityAt ?? b.timestamp) - (a.lastActivityAt ?? a.timestamp),
+  );
 }
 
 export { mergeCodexIndexedSessions };

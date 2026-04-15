@@ -89,6 +89,7 @@ export function matchesProcessCommand(command: string, processName: string): boo
 
 /** Electron sub-process flags that indicate a desktop GUI helper, not a CLI agent. */
 const ELECTRON_TYPE_RE = /--type=(utility|renderer|gpu-process|zygote|broker)/;
+const CODEX_VSCODE_APP_SERVER_RE = /[/\\]codex\s+app-server(?:\s|$)/i;
 
 /** Match a process against agent signatures using process name first, then cmd fallback. */
 export function detectAgentFromProcessSignature(
@@ -101,6 +102,9 @@ export function detectAgentFromProcessSignature(
 
   const name = proc.name.toLowerCase();
   const command = (proc.cmd ?? "").toLowerCase();
+  if (command.includes(".vscode/extensions") && CODEX_VSCODE_APP_SERVER_RE.test(proc.cmd ?? "")) {
+    return null;
+  }
   for (const [agentName, agentConfig] of Object.entries(config.agents)) {
     for (const pname of agentConfig.processNames) {
       if (name === pname) return agentName;

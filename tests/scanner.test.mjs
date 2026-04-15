@@ -90,6 +90,19 @@ describe("detectAgentFromProcessSignature", () => {
       null,
     );
   });
+
+  it("does not treat VS Code Codex app-server processes as trackable agent sessions", () => {
+    assert.equal(
+      detectAgentFromProcessSignature(
+        {
+          name: "codex",
+          cmd: "/Users/me/.vscode/extensions/openai.chatgpt/bin/macos-aarch64/codex app-server --analytics-default-enabled",
+        },
+        config,
+      ),
+      null,
+    );
+  });
 });
 
 describe("parseGeminiSessionContent", () => {
@@ -302,7 +315,10 @@ describe("indexCodexSessions", () => {
       merged.map((session) => session.id),
       ["jsonl-only", "shared", "sqlite-only"],
     );
-    assert.equal(merged.find((session) => session.id === "shared")?.filePath, "/tmp/shared-jsonl.jsonl");
+    assert.equal(
+      merged.find((session) => session.id === "shared")?.filePath,
+      "/tmp/shared-jsonl.jsonl",
+    );
     assert.equal(merged.find((session) => session.id === "shared")?.timestamp, 180);
     assert.equal(
       merged.find((session) => session.id === "shared")?.totalTokenUsage?.total_tokens,
