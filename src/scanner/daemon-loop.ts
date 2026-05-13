@@ -55,6 +55,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Token/context threshold alerts fire only when both master and category toggles are on. */
+export function shouldRunTokenAlerts(config: MarmonitorConfig): boolean {
+  return Boolean(config.alerts.enabled && config.alerts.tokens);
+}
+
 export async function runDaemonLoop(
   config: MarmonitorConfig,
   options: DaemonOptions,
@@ -136,8 +141,8 @@ export async function runDaemonLoop(
       // Write snapshot for statusline consumers
       await writeDaemonSnapshot(snapshotPath, agents);
 
-      // Check token thresholds and fire alerts (alerts.enabled 확인)
-      if (config.alerts.enabled) {
+      // Check token thresholds and fire alerts (alerts.enabled + alerts.tokens 확인)
+      if (shouldRunTokenAlerts(config)) {
         const thresholds = {
           warnAt: config.alerts.contextWarnThreshold,
           critAt: config.alerts.contextCritThreshold,
