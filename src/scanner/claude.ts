@@ -517,11 +517,9 @@ async function readJsonlSessionMeta(
  *  - F1: if currentDirectPath exists and its first-line timestamp is on or
  *        after processStartedAt, the current jsonl was authored by this
  *        process — keep it, do not override.
- *  - F2: if the override-candidate sessionId is already recorded as a
- *        direct binding in claudeSessionRegistry, refuse the override. The
- *        registry stores filePath / sessionId / cwd / binding (no live-PID
- *        field), so this is "another scan has already claimed this jsonl
- *        as authoritative," not a live-process check.
+ *  - F2: if the override-candidate sessionId is already direct-bound in
+ *        claudeSessionRegistry, refuse the override. Keeps the
+ *        one-jsonl-per-sessionId invariant intact.
  *  - F3: anything ambiguous falls through to `undefined` (unresolved) —
  *        a missed match is safer than a misrouted one.
  */
@@ -585,13 +583,9 @@ async function chooseStaleSessionOverride(
   if (!recentMeta?.sessionId) return undefined;
   if (recentMeta.sessionId === currentSessionId) return undefined;
 
-  // F2: the candidate jsonl is already recorded as a direct binding in the
-  // session registry — i.e. an earlier resolution (or another concurrent
-  // scan) has already claimed it as authoritative for its own sessionId.
-  // The registry has no live-PID field, so this is a "registry already
-  // claimed this jsonl" check, not a process-aliveness check. Refusing
-  // here keeps the one-jsonl-per-sessionId invariant intact and avoids
-  // the misroute in #103.
+  // F2: the candidate sessionId is already direct-bound in the registry.
+  // Overriding would let two sessionIds share one jsonl — the exact bug
+  // in #103. Keeps the one-jsonl-per-sessionId invariant.
   const recentBinding = claudeSessionRegistry.get(recentMeta.sessionId);
   if (recentBinding?.binding === "direct") return undefined;
 
