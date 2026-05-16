@@ -60,6 +60,14 @@ describe("getDefaults", () => {
     assert.equal(config.performance.stdoutHeuristicTtlMs, 2000);
   });
 
+  it("defaults alerts.tokens=true and master toggles=false", () => {
+    const config = getDefaults();
+    assert.equal(config.alerts.enabled, false);
+    assert.equal(config.alerts.desktop, false);
+    assert.equal(config.alerts.log, false);
+    assert.equal(config.alerts.tokens, true);
+  });
+
   it("includes all three default agents", () => {
     const config = getDefaults();
     assert.ok(config.agents["Claude Code"]);
@@ -165,6 +173,29 @@ describe("loadConfig", () => {
       assert.deepEqual(config.paths.extraRoots, []);
       assert.equal(config.performance.snapshotTtlMs, 2000);
       assert.deepEqual(config.agents.Codex.processNames, ["codex"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("merges alerts.tokens override (security alerts unaffected)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "marmonitor-config-"));
+    const path = join(dir, "settings.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        alerts: { enabled: true, desktop: true, tokens: false },
+      }),
+    );
+
+    try {
+      const config = await loadConfig(path);
+      assert.equal(config.alerts.enabled, true);
+      assert.equal(config.alerts.desktop, true);
+      assert.equal(config.alerts.tokens, false);
+      // unspecified fields fall back to defaults
+      assert.equal(config.alerts.log, false);
+      assert.equal(config.alerts.contextCritThreshold, 0.85);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

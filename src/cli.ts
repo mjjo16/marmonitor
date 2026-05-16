@@ -907,7 +907,7 @@ program
 
 async function patchAlertsConfig(
   configPath: string,
-  patch: Partial<{ enabled: boolean; desktop: boolean; log: boolean }>,
+  patch: Partial<{ enabled: boolean; desktop: boolean; log: boolean; tokens: boolean }>,
 ): Promise<void> {
   await mkdir(dirname(configPath), { recursive: true });
   let current: Record<string, unknown> = {};
@@ -936,6 +936,7 @@ const alertsCmd = program
     console.log(`alerts.enabled  : ${a.enabled}`);
     console.log(`alerts.desktop  : ${a.desktop}`);
     console.log(`alerts.log      : ${a.log}`);
+    console.log(`alerts.tokens   : ${a.tokens} (token/context threshold alerts)`);
     console.log(
       `alerts.contextCritThreshold: ${a.contextCritThreshold} (${Math.round(a.contextCritThreshold * 100)}%)`,
     );
@@ -977,6 +978,22 @@ alertsCmd
     await patchAlertsConfig(p, { desktop: toggle === "on" });
     console.log(
       `Desktop notifications ${toggle === "on" ? "enabled" : "disabled"}. Restart daemon to apply: marmonitor restart`,
+    );
+  });
+
+alertsCmd
+  .command("tokens <on|off>")
+  .description("Toggle token/context threshold alerts (security alerts unaffected)")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (toggle, opts) => {
+    if (toggle !== "on" && toggle !== "off") {
+      console.error("Usage: marmonitor alerts tokens on|off");
+      process.exit(1);
+    }
+    const p = resolveConfigPath(opts) ?? getDefaultConfigPath();
+    await patchAlertsConfig(p, { tokens: toggle === "on" });
+    console.log(
+      `Token/context alerts ${toggle === "on" ? "enabled" : "disabled"}. Restart daemon to apply: marmonitor restart`,
     );
   });
 
