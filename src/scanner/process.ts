@@ -76,7 +76,7 @@ export function detectRuntimeSource(agentName: string, cmd?: string): RuntimeSou
   if (agentName !== "Codex") return undefined;
   const normalized = (cmd ?? "").toLowerCase();
   if (!normalized) return "unknown";
-  if (normalized.includes(".vscode/extensions") || normalized.includes("app-server")) {
+  if (normalized.includes(".vscode/extensions")) {
     return "vscode";
   }
   return "cli";
@@ -91,6 +91,9 @@ export function matchesProcessCommand(command: string, processName: string): boo
 const ELECTRON_TYPE_RE = /--type=(utility|renderer|gpu-process|zygote|broker)/;
 const CODEX_VSCODE_APP_SERVER_RE = /[/\\]codex\s+app-server(?:\s|$)/i;
 
+/** Codex `app-server` mode is an IDE/Desktop embedded RPC backend, not an interactive CLI session. */
+const CODEX_APP_SERVER_RE = /\bcodex\b[\s\S]*\bapp-server\b/i;
+
 /** Match a process against agent signatures using process name first, then cmd fallback. */
 export function detectAgentFromProcessSignature(
   proc: { name: string; cmd?: string },
@@ -99,6 +102,9 @@ export function detectAgentFromProcessSignature(
   // Skip Electron sub-processes (renderer, utility, gpu, zygote) to avoid
   // false-positive detection of desktop apps (e.g. Claude Desktop) as CLI agents.
   if (proc.cmd && ELECTRON_TYPE_RE.test(proc.cmd)) return null;
+  // Skip `codex app-server` backends spawned by Codex Desktop or the VS Code
+  // Codex extension — these are RPC backends, not interactive CLI sessions.
+  if (proc.cmd && CODEX_APP_SERVER_RE.test(proc.cmd)) return null;
 
   const name = proc.name.toLowerCase();
   const command = (proc.cmd ?? "").toLowerCase();
