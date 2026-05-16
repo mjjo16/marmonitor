@@ -62,6 +62,42 @@ describe("checkTokenAlert (context-size gate, #102 G2)", () => {
     assert.equal(alert, undefined);
   });
 
+  it("does not fire when lastInputTokens is null (external JSON null)", () => {
+    // gemini-code-assist review on PR #59: external JSON parsing can yield
+    // `null` instead of `undefined`. Number.isFinite guard handles both.
+    const store = new AlertStore();
+    const alert = checkTokenAlert(
+      store,
+      makeAgent({
+        inputTokens: 2_000_000,
+        outputTokens: 0,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 0,
+        totalTokens: 2_000_000,
+        lastInputTokens: null,
+      }),
+    );
+    assert.equal(alert, undefined);
+  });
+
+  it("does not fire when lastInputTokens is NaN or non-finite", () => {
+    const store = new AlertStore();
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      const alert = checkTokenAlert(
+        store,
+        makeAgent({
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheCreationTokens: 0,
+          cacheReadTokens: 0,
+          totalTokens: 0,
+          lastInputTokens: bad,
+        }),
+      );
+      assert.equal(alert, undefined, `bad value ${bad} should not fire`);
+    }
+  });
+
   it("does not fire when lastInputTokens is below thresholds", () => {
     const store = new AlertStore();
     const alert = checkTokenAlert(

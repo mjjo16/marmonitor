@@ -53,13 +53,15 @@ export function checkTokenAlert(
   if (!usage) return undefined;
 
   // lastInputTokens = most recent API call's input_tokens = actual current context size.
-  // Only fire when this definitive signal is available. Falling back to the
-  // cumulative inputTokens (which grows unboundedly across a session) would
-  // massively overstate the context % for agents that do not populate
-  // lastInputTokens — most notably Codex. Tracked as GitHub #55 / local #102
-  // (root fix: split TokenUsage into cumulative vs context-window fields).
-  if (usage.lastInputTokens === undefined) return undefined;
-  const used = usage.lastInputTokens;
+  // Only fire when this definitive signal is available as a finite number.
+  // `Number.isFinite` rejects undefined / null (e.g. from external JSON) / NaN /
+  // Infinity in one check. Falling back to the cumulative inputTokens (which
+  // grows unboundedly across a session) would massively overstate the context %
+  // for agents that do not populate lastInputTokens — most notably Codex.
+  // Tracked as GitHub #55 / local #102 (root fix: split TokenUsage into
+  // cumulative vs context-window fields).
+  if (!Number.isFinite(usage.lastInputTokens)) return undefined;
+  const used = usage.lastInputTokens as number;
   const limit = contextLimit(agent.model);
   const ratio = used / limit;
 
