@@ -74,6 +74,32 @@ describe("detectAgentFromProcessSignature", () => {
     );
   });
 
+  it("does not match Codex `app-server` backends from Desktop or VS Code", () => {
+    // Codex Desktop and the VS Code Codex extension spawn the real codex
+    // binary in `app-server` mode as an RPC backend — not an interactive
+    // session — so it must not show up as a CLI agent.
+    assert.equal(
+      detectAgentFromProcessSignature(
+        {
+          name: "node",
+          cmd: "/home/sam/.asdf/installs/nodejs/24.13.0/bin/node /home/sam/.npm-global/bin/codex app-server --analytics-default-enabled",
+        },
+        config,
+      ),
+      null,
+    );
+    assert.equal(
+      detectAgentFromProcessSignature(
+        {
+          name: "codex",
+          cmd: "/home/sam/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex app-server --analytics-default-enabled",
+        },
+        config,
+      ),
+      null,
+    );
+  });
+
   it("does not falsely match unrelated node processes", () => {
     assert.equal(
       detectAgentFromProcessSignature(
