@@ -148,9 +148,36 @@ export async function getActiveTmuxPanePid(): Promise<number | undefined> {
   }
 }
 
+/** Get the controlling tty of a PID via lsof (`-d 0` reads stdin fd → tty).
+ *  Uses lsof instead of `ps -o tty=` because the latter returns EPERM on
+ *  macOS for processes the caller does not own in the same session. */
+export async function getProcessTty(pid: number): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-d", "0", "-Fn"], {
+      timeout: 2000,
+    });
+    const line = stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.startsWith("n/"));
+    return line ? line.slice(1) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Find the agent PID that runs inside the currently active tmux pane.
- *  When panePid is provided, skips the tmux query (useful when the caller
- *  already resolved the active pane PID for cache-key purposes). */
+ *
+ *  Two-tier match:
+ *    1. pid-tree — `panePid` is the pane's shell PID; walk its descendants
+ *       and find one matching `agentPids`. Works in most cases.
+ *    2. tty fallback — when the pid-tree walk misses (e.g. macOS denies
+ *       ps walks for some processes), compare the pane's controlling tty
+ *       with each agent process's controlling tty. The agent and the
+ *       pane's shell share a tty when they run in the same pane.
+ *
+ *  When `panePid` is provided, skips the tmux query (useful when the
+ *  caller already resolved the active pane PID for cache-key purposes). */
 export async function findActiveAgentPid(
   agentPids: number[],
   panePid?: number,
@@ -159,8 +186,20 @@ export async function findActiveAgentPid(
   try {
     const activePanePid = panePid ?? (await getActiveTmuxPanePid());
     if (!activePanePid) return undefined;
+
+    // Tier 1: pid-tree
     const childMap = await getProcessTree();
-    return agentPids.find((pid) => isPidInTree(activePanePid, pid, childMap));
+    const treeMatch = agentPids.find((pid) => isPidInTree(activePanePid, pid, childMap));
+    if (treeMatch !== undefined) return treeMatch;
+
+    // Tier 2: tty fallback
+    const paneTty = await getProcessTty(activePanePid);
+    if (!paneTty) return undefined;
+    for (const agentPid of agentPids) {
+      const agentTty = await getProcessTty(agentPid);
+      if (agentTty && agentTty === paneTty) return agentPid;
+    }
+    return undefined;
   } catch {
     return undefined;
   }

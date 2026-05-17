@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
 import { renderInstallBanner, renderRuntimeBanner } from "./banner/index.js";
+import { ClipboardError, writeClipboard } from "./clipboard.js";
 import {
   getConfigDir,
   getConfigSearchPaths,
@@ -43,7 +44,7 @@ import {
   selectUnmatchedTargets,
 } from "./output/utils.js";
 import { TERMINAL_RESTORE_SEQUENCE, formatProcessFailure } from "./process-safety.js";
-import { detectClaudePhase } from "./scanner/claude.js";
+import { detectClaudePhase, resolveClaudeSessionFile } from "./scanner/claude.js";
 import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./scanner/codex.js";
 import { isDaemonRunning, readDaemonPid, readDaemonSnapshot } from "./scanner/daemon-utils.js";
 import { parseGeminiSession } from "./scanner/gemini.js";
@@ -1659,6 +1660,119 @@ program
     await stopDaemon();
     await startDaemon();
     process.exit(0);
+  });
+
+// ── copy-latest-turn command ─────────────────────────────────────────────────
+
+program
+  .command("copy-latest-turn")
+  .description(
+    "Copy the most recent AI turn of the active tmux pane to the clipboard (Claude only)",
+  )
+  .option("--role <role>", "Which turn to copy: assistant (default) or user", "assistant")
+  .option("--mode <mode>", "Extraction mode: text (default) or bundle", "text")
+  .option(
+    "--pane-pid <pid>",
+    "Override active pane PID (default: tmux active pane). Useful for tmux key bindings that pass #{pane_pid}.",
+  )
+  .option("--stdout", "Print the turn to stdout instead of copying to clipboard")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const { parseClaudeConversationTurns, selectLatestTurn, turnTextForMode } = await import(
+      "./turns.js"
+    );
+
+    const role: "assistant" | "user" = opts.role === "user" ? "user" : "assistant";
+    const mode: "text" | "bundle" = opts.mode === "bundle" ? "bundle" : "text";
+
+    const agents = await requireDaemonSnapshot();
+
+    let agent: AgentSession | undefined;
+    let panePidOverridden = false;
+    if (typeof opts.panePid === "string") {
+      const panePid = Number.parseInt(opts.panePid, 10);
+      if (!Number.isFinite(panePid)) {
+        console.error(`Invalid --pane-pid value: ${opts.panePid}`);
+        process.exit(1);
+      }
+      panePidOverridden = true;
+      const agentPids = agents.map((a) => a.pid);
+      const matchedPid = await findActiveAgentPid(agentPids, panePid);
+      if (matchedPid !== undefined) {
+        agent = agents.find((a) => a.pid === matchedPid);
+      }
+    } else {
+      // Active tmux pane fallback
+      const agentPids = agents.map((a) => a.pid);
+      const matchedPid = await findActiveAgentPid(agentPids);
+      if (matchedPid !== undefined) {
+        agent = agents.find((a) => a.pid === matchedPid);
+      }
+    }
+
+    if (!agent) {
+      console.error(
+        panePidOverridden
+          ? `No AI session matched the given pane PID (${opts.panePid}).`
+          : "No AI session in this tmux pane. Switch to a Claude pane and try again.",
+      );
+      process.exit(1);
+    }
+
+    if (agent.agentName !== "Claude Code") {
+      console.error(`Turn copy is not supported for ${agent.agentName} yet.`);
+      process.exit(1);
+    }
+
+    if (!agent.sessionId) {
+      console.error("Active Claude session has no sessionId yet — try again in a moment.");
+      process.exit(1);
+    }
+
+    const config = await loadConfig(resolveConfigPath(opts));
+    const sessionFile = await resolveClaudeSessionFile(
+      agent.sessionId,
+      agent.cwd,
+      agent.startedAt,
+      config,
+    );
+    if (!sessionFile) {
+      console.error("Claude session file not found for this pane.");
+      process.exit(1);
+    }
+
+    const raw = await readFile(sessionFile, "utf-8");
+    const turns = parseClaudeConversationTurns(raw);
+    const turn = selectLatestTurn(turns, role);
+    if (!turn) {
+      console.error(`No recent ${role} turn found in this Claude session.`);
+      process.exit(1);
+    }
+
+    const text = turnTextForMode(turn, mode);
+    if (!text) {
+      console.error(`Latest ${role} turn has no ${mode === "bundle" ? "bundle" : "text"} content.`);
+      process.exit(1);
+    }
+
+    if (opts.stdout) {
+      console.log(text);
+      return;
+    }
+
+    try {
+      await writeClipboard(text);
+      const chars = text.length;
+      const label = role === "assistant" ? "AI" : "user";
+      console.log(`marmonitor: copied ${label} turn (${chars} chars)`);
+    } catch (err) {
+      if (err instanceof ClipboardError) {
+        console.error(err.message);
+      } else {
+        console.error(`Clipboard copy failed: ${(err as Error).message}. Try --stdout instead.`);
+      }
+      process.exit(1);
+    }
   });
 
 installProcessSafetyHandlers();
