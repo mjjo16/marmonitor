@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseClaudeConversationTurns, selectLatestTurn, turnTextForMode } from "../dist/turns.js";
+import {
+  parseClaudeConversationTurns,
+  parseCodexConversationTurns,
+  parseGeminiConversationTurns,
+  selectLatestTurn,
+  turnTextForMode,
+} from "../dist/turns.js";
 
 function jsonl(...lines) {
   return lines.map((l) => JSON.stringify(l)).join("\n");
+}
+
+function codexLine(payload, ts = "2026-05-18T01:00:00.000Z") {
+  return JSON.stringify({ timestamp: ts, type: "response_item", payload });
 }
 
 describe("parseClaudeConversationTurns — user turn", () => {
@@ -305,5 +315,192 @@ describe("turnTextForMode", () => {
   it("falls back to text when bundle is missing", () => {
     const t = { role: "user", text: "u1" };
     assert.equal(turnTextForMode(t, "bundle"), "u1");
+  });
+});
+
+describe("parseCodexConversationTurns", () => {
+  it("groups user message + assistant message + tool cycle into a single assistant turn", () => {
+    const raw = [
+      codexLine({
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "find files" }],
+      }),
+      codexLine({
+        type: "reasoning",
+        summary: ["thinking..."],
+        content: null,
+      }),
+      codexLine({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "파일을 찾아볼게요." }],
+      }),
+      codexLine({
+        type: "function_call",
+        name: "exec_command",
+        arguments: '{"cmd":"rg foo","workdir":"/tmp"}',
+        call_id: "call_1",
+      }),
+      codexLine({
+        type: "function_call_output",
+        call_id: "call_1",
+        output: "match1\nmatch2",
+      }),
+      codexLine({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "두 개 찾았습니다." }],
+      }),
+    ].join("\n");
+
+    const turns = parseCodexConversationTurns(raw);
+    assert.equal(turns.length, 2);
+
+    assert.equal(turns[0].role, "user");
+    assert.equal(turns[0].text, "find files");
+
+    assert.equal(turns[1].role, "assistant");
+    // option B (text-only): reasoning + function_call + function_call_output 제외
+    assert.match(turns[1].text, /파일을 찾아볼게요/);
+    assert.match(turns[1].text, /두 개 찾았습니다/);
+    assert.doesNotMatch(turns[1].text, /function_call/);
+    assert.doesNotMatch(turns[1].text, /thinking/);
+
+    // bundle: text + function_call(arguments pretty) + function_call_output
+    const bundle = turns[1].bundle ?? "";
+    assert.match(bundle, /\[function_call:exec_command\]/);
+    assert.match(bundle, /"cmd": "rg foo"/);
+    assert.match(bundle, /\[function_call_output\]/);
+    assert.match(bundle, /match1/);
+    assert.doesNotMatch(bundle, /thinking/); // reasoning은 여전히 제외
+  });
+
+  it("separates later user messages from previous assistant turn", () => {
+    const raw = [
+      codexLine({ type: "message", role: "user", content: [{ type: "input_text", text: "q1" }] }),
+      codexLine({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "a1" }],
+      }),
+      codexLine({ type: "message", role: "user", content: [{ type: "input_text", text: "q2" }] }),
+      codexLine({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "a2" }],
+      }),
+    ].join("\n");
+
+    const turns = parseCodexConversationTurns(raw);
+    assert.equal(turns.length, 4);
+    assert.equal(turns[2].text, "q2");
+    assert.equal(turns[3].text, "a2");
+  });
+
+  it("skips developer messages and unknown response_item types gracefully", () => {
+    const raw = [
+      codexLine({
+        type: "message",
+        role: "developer",
+        content: [{ type: "input_text", text: "system instruction" }],
+      }),
+      codexLine({
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "hi" }],
+      }),
+      codexLine({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "hello" }],
+      }),
+      codexLine({ type: "web_search_call", payload_extra: "..." }),
+      codexLine({ type: "unknown_future_type" }),
+    ].join("\n");
+
+    const turns = parseCodexConversationTurns(raw);
+    assert.equal(turns.length, 2);
+    assert.equal(turns[0].text, "hi");
+    assert.equal(turns[1].text, "hello");
+    assert.match(turns[1].bundle ?? "", /\[web_search_call\]/);
+  });
+
+  it("ignores non-response_item lines (session_meta, event_msg, turn_context)", () => {
+    const raw = [
+      JSON.stringify({ type: "session_meta", payload: { id: "s1" } }),
+      JSON.stringify({ type: "event_msg", payload: { kind: "..." } }),
+      JSON.stringify({ type: "turn_context", payload: { turn_id: "t1" } }),
+      codexLine({ type: "message", role: "user", content: [{ type: "input_text", text: "ok" }] }),
+      codexLine({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "fine" }],
+      }),
+    ].join("\n");
+
+    const turns = parseCodexConversationTurns(raw);
+    assert.equal(turns.length, 2);
+  });
+
+  it("returns empty array on empty input or malformed JSON", () => {
+    assert.deepEqual(parseCodexConversationTurns(""), []);
+    assert.deepEqual(parseCodexConversationTurns("not json\n{ broken"), []);
+  });
+});
+
+describe("parseGeminiConversationTurns", () => {
+  it("groups type:user + type:gemini into ordered turns", () => {
+    const raw = JSON.stringify({
+      messages: [
+        { type: "info", content: "auth ok", timestamp: "2026-04-07T01:21:00.000Z" },
+        { type: "user", content: "안녕", timestamp: "2026-04-07T01:22:00.000Z" },
+        { type: "gemini", content: "반가워요!", timestamp: "2026-04-07T01:22:01.000Z" },
+        { type: "user", content: "고마워", timestamp: "2026-04-07T01:23:00.000Z" },
+        { type: "gemini", content: "별말씀을요.", timestamp: "2026-04-07T01:23:01.000Z" },
+      ],
+    });
+
+    const turns = parseGeminiConversationTurns(raw);
+    assert.equal(turns.length, 4);
+    assert.equal(turns[0].role, "user");
+    assert.equal(turns[0].text, "안녕");
+    assert.equal(turns[1].role, "assistant");
+    assert.equal(turns[1].text, "반가워요!");
+    assert.equal(turns[3].text, "별말씀을요.");
+  });
+
+  it("skips info/error/unknown message types", () => {
+    const raw = JSON.stringify({
+      messages: [
+        { type: "info", content: "..." },
+        { type: "error", content: "..." },
+        { type: "tool", content: "..." },
+        { type: "user", content: "hi" },
+        { type: "gemini", content: "hello" },
+      ],
+    });
+    const turns = parseGeminiConversationTurns(raw);
+    assert.equal(turns.length, 2);
+  });
+
+  it("falls back to parts[].text when content is missing", () => {
+    const raw = JSON.stringify({
+      messages: [
+        { type: "user", parts: [{ text: "from parts" }] },
+        { type: "gemini", parts: [{ text: "first part" }, { text: "second part" }] },
+      ],
+    });
+    const turns = parseGeminiConversationTurns(raw);
+    assert.equal(turns.length, 2);
+    assert.equal(turns[0].text, "from parts");
+    assert.equal(turns[1].text, "first part\n\nsecond part");
+  });
+
+  it("returns empty array on malformed JSON or missing messages", () => {
+    assert.deepEqual(parseGeminiConversationTurns(""), []);
+    assert.deepEqual(parseGeminiConversationTurns("not json"), []);
+    assert.deepEqual(parseGeminiConversationTurns("{}"), []);
+    assert.deepEqual(parseGeminiConversationTurns(JSON.stringify({ messages: null })), []);
   });
 });

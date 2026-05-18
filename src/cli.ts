@@ -1667,7 +1667,7 @@ program
 program
   .command("copy-latest-turn")
   .description(
-    "Copy the most recent AI turn of the active tmux pane to the clipboard (Claude only)",
+    "Copy the most recent AI turn of the active tmux pane to the clipboard (Claude / Codex / Gemini)",
   )
   .option("--role <role>", "Which turn to copy: assistant (default) or user", "assistant")
   .option("--mode <mode>", "Extraction mode: text (default) or bundle", "text")
@@ -1678,9 +1678,13 @@ program
   .option("--stdout", "Print the turn to stdout instead of copying to clipboard")
   .option("--config <path>", "Path to settings.json")
   .action(async (opts) => {
-    const { parseClaudeConversationTurns, selectLatestTurn, turnTextForMode } = await import(
-      "./turns.js"
-    );
+    const {
+      parseClaudeConversationTurns,
+      parseCodexConversationTurns,
+      parseGeminiConversationTurns,
+      selectLatestTurn,
+      turnTextForMode,
+    } = await import("./turns.js");
 
     const role: "assistant" | "user" = opts.role === "user" ? "user" : "assistant";
     const mode: "text" | "bundle" = opts.mode === "bundle" ? "bundle" : "text";
@@ -1719,33 +1723,59 @@ program
       process.exit(1);
     }
 
-    if (agent.agentName !== "Claude Code") {
+    const config = await loadConfig(resolveConfigPath(opts));
+
+    // Resolve the agent-specific source file and parse to SessionTurn[].
+    let sessionFile: string | undefined;
+    let turns: ReturnType<typeof parseClaudeConversationTurns> = [];
+
+    if (agent.agentName === "Claude Code") {
+      if (!agent.sessionId) {
+        console.error("Active Claude session has no sessionId yet — try again in a moment.");
+        process.exit(1);
+      }
+      sessionFile = await resolveClaudeSessionFile(
+        agent.sessionId,
+        agent.cwd,
+        agent.startedAt,
+        config,
+      );
+      if (!sessionFile) {
+        console.error("Claude session file not found for this pane.");
+        process.exit(1);
+      }
+      const raw = await readFile(sessionFile, "utf-8");
+      turns = parseClaudeConversationTurns(raw);
+    } else if (agent.agentName === "Codex") {
+      // Codex sessions are indexed by cwd + processStartedAt; the rollout
+      // JSONL path comes from the indexer.
+      const codexSessions = await indexCodexSessions(config, { activeCwds: [agent.cwd] });
+      const matched = matchCodexSession(agent.cwd, agent.processStartedAt, codexSessions);
+      if (!matched?.filePath) {
+        console.error("Codex rollout file not found for this pane.");
+        process.exit(1);
+      }
+      sessionFile = matched.filePath;
+      const raw = await readFile(sessionFile, "utf-8");
+      turns = parseCodexConversationTurns(raw);
+    } else if (agent.agentName === "Gemini") {
+      // Gemini chats: parseGeminiSession returns the resolved sessionFile.
+      const gemini = await parseGeminiSession(agent.cwd);
+      if (!gemini.sessionFile) {
+        console.error("Gemini chat file not found for this pane.");
+        process.exit(1);
+      }
+      sessionFile = gemini.sessionFile;
+      const raw = await readFile(sessionFile, "utf-8");
+      turns = parseGeminiConversationTurns(raw);
+    } else {
       console.error(`Turn copy is not supported for ${agent.agentName} yet.`);
       process.exit(1);
     }
 
-    if (!agent.sessionId) {
-      console.error("Active Claude session has no sessionId yet — try again in a moment.");
-      process.exit(1);
-    }
-
-    const config = await loadConfig(resolveConfigPath(opts));
-    const sessionFile = await resolveClaudeSessionFile(
-      agent.sessionId,
-      agent.cwd,
-      agent.startedAt,
-      config,
-    );
-    if (!sessionFile) {
-      console.error("Claude session file not found for this pane.");
-      process.exit(1);
-    }
-
-    const raw = await readFile(sessionFile, "utf-8");
-    const turns = parseClaudeConversationTurns(raw);
     const turn = selectLatestTurn(turns, role);
     if (!turn) {
-      console.error(`No recent ${role} turn found in this Claude session.`);
+      console.error(`No recent ${role} turn found in this ${agent.agentName} session.`);
       process.exit(1);
     }
 
