@@ -44,7 +44,11 @@ import {
   selectUnmatchedTargets,
 } from "./output/utils.js";
 import { TERMINAL_RESTORE_SEQUENCE, formatProcessFailure } from "./process-safety.js";
-import { detectClaudePhase, resolveClaudeSessionFile } from "./scanner/claude.js";
+import {
+  detectClaudePhase,
+  matchClaudeSessionByMtime,
+  resolveClaudeSessionFile,
+} from "./scanner/claude.js";
 import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./scanner/codex.js";
 import { isDaemonRunning, readDaemonPid, readDaemonSnapshot } from "./scanner/daemon-utils.js";
 import { parseGeminiSession, resolveGeminiChatFile } from "./scanner/gemini.js";
@@ -1730,16 +1734,23 @@ program
     let turns: ReturnType<typeof parseClaudeConversationTurns> = [];
 
     if (agent.agentName === "Claude Code") {
-      if (!agent.sessionId) {
+      // Daemon snapshot can lag heavy scan by up to 30s, so `agent.sessionId`
+      // may be stale when the user `/resume`s a different sessionId in the
+      // same PID. Re-resolve live against on-disk JSONL mtime for this pane's
+      // cwd/processStartedAt before falling back to the cached sessionId.
+      let liveSessionId: string | undefined;
+      try {
+        const live = await matchClaudeSessionByMtime(agent.cwd, agent.processStartedAt, config);
+        if (live?.sessionId) liveSessionId = live.sessionId;
+      } catch {
+        // fall through to snapshot sessionId
+      }
+      const sessionId = liveSessionId ?? agent.sessionId;
+      if (!sessionId) {
         console.error("Active Claude session has no sessionId yet — try again in a moment.");
         process.exit(1);
       }
-      sessionFile = await resolveClaudeSessionFile(
-        agent.sessionId,
-        agent.cwd,
-        agent.startedAt,
-        config,
-      );
+      sessionFile = await resolveClaudeSessionFile(sessionId, agent.cwd, agent.startedAt, config);
       if (!sessionFile) {
         console.error("Claude session file not found for this pane.");
         process.exit(1);
