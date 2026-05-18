@@ -47,7 +47,7 @@ import { TERMINAL_RESTORE_SEQUENCE, formatProcessFailure } from "./process-safet
 import { detectClaudePhase, resolveClaudeSessionFile } from "./scanner/claude.js";
 import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./scanner/codex.js";
 import { isDaemonRunning, readDaemonPid, readDaemonSnapshot } from "./scanner/daemon-utils.js";
-import { parseGeminiSession } from "./scanner/gemini.js";
+import { parseGeminiSession, resolveGeminiChatFile } from "./scanner/gemini.js";
 import { scanAgents } from "./scanner/index.js";
 import { loadRegistryFromFile } from "./scanner/session-registry.js";
 import { detectCliStdoutPhase } from "./scanner/status.js";
@@ -1747,10 +1747,27 @@ program
       const raw = await readFile(sessionFile, "utf-8");
       turns = parseClaudeConversationTurns(raw);
     } else if (agent.agentName === "Codex") {
-      // Codex sessions are indexed by cwd + processStartedAt; the rollout
-      // JSONL path comes from the indexer.
+      // Mirror scanner's session resolution priority: persistent binding
+      // registry (PID × processStartedAt → rollout) first, fallback to
+      // cwd + processStartedAt matching. Same-cwd multi-Codex environments
+      // would otherwise route to the wrong rollout file.
       const codexSessions = await indexCodexSessions(config, { activeCwds: [agent.cwd] });
-      const matched = matchCodexSession(agent.cwd, agent.processStartedAt, codexSessions);
+      const { loadCodexBindingRegistryFromFile, selectCodexBindingSession } = await import(
+        "./scanner/codex-binding-registry.js"
+      );
+      const bindingRegistry = new Map();
+      await loadCodexBindingRegistryFromFile(
+        join(getConfigDir(), "codex-binding-registry.json"),
+        bindingRegistry,
+      );
+      const matched =
+        selectCodexBindingSession(
+          bindingRegistry,
+          agent.pid,
+          agent.processStartedAt,
+          agent.cwd,
+          codexSessions,
+        ) ?? matchCodexSession(agent.cwd, agent.processStartedAt, codexSessions);
       if (!matched?.filePath) {
         console.error("Codex rollout file not found for this pane.");
         process.exit(1);
@@ -1759,13 +1776,18 @@ program
       const raw = await readFile(sessionFile, "utf-8");
       turns = parseCodexConversationTurns(raw);
     } else if (agent.agentName === "Gemini") {
-      // Gemini chats: parseGeminiSession returns the resolved sessionFile.
-      const gemini = await parseGeminiSession(agent.cwd);
-      if (!gemini.sessionFile) {
+      // Match the snapshot's sessionId against on-disk Gemini chats first so
+      // multi-session same-cwd environments don't fall back to "latest mtime
+      // wins". parseGeminiSession (latest mtime) remains as a graceful fallback.
+      sessionFile = await resolveGeminiChatFile(agent.cwd, agent.sessionId);
+      if (!sessionFile) {
+        const gemini = await parseGeminiSession(agent.cwd);
+        sessionFile = gemini.sessionFile;
+      }
+      if (!sessionFile) {
         console.error("Gemini chat file not found for this pane.");
         process.exit(1);
       }
-      sessionFile = gemini.sessionFile;
       const raw = await readFile(sessionFile, "utf-8");
       turns = parseGeminiConversationTurns(raw);
     } else {

@@ -113,6 +113,67 @@ export async function resolveGeminiProjectDir(cwd: string): Promise<string | und
   return undefined;
 }
 
+/**
+ * Resolve a Gemini chats file by sessionId match first, then by latest mtime.
+ *
+ * Same-cwd multi-session safety: when `sessionId` is provided we scan each
+ * chats/*.json's `sessionId` field and return the matching path. Without a
+ * match we fall back to the most recently modified file (the legacy
+ * behaviour of parseGeminiSession). Returns undefined if no chats dir or
+ * no files exist.
+ */
+export async function resolveGeminiChatFile(
+  cwd: string,
+  sessionId?: string,
+): Promise<string | undefined> {
+  const projectDir = await resolveGeminiProjectDir(cwd);
+  if (!projectDir) return undefined;
+
+  const chatsDir = join(projectDir, "chats");
+  if (!existsSync(chatsDir)) return undefined;
+
+  let files: string[];
+  try {
+    files = (await readdir(chatsDir))
+      .filter((name) => name.startsWith("session-") && name.endsWith(".json"))
+      .map((name) => join(chatsDir, name));
+  } catch {
+    return undefined;
+  }
+  if (files.length === 0) return undefined;
+
+  // Tier 1: sessionId match — open each file, return on first hit.
+  if (sessionId) {
+    for (const filePath of files) {
+      try {
+        const raw = await readFile(filePath, "utf-8");
+        const data = JSON.parse(raw) as { sessionId?: unknown };
+        if (typeof data.sessionId === "string" && data.sessionId === sessionId) {
+          return filePath;
+        }
+      } catch {
+        // skip unreadable / malformed file
+      }
+    }
+  }
+
+  // Tier 2: fallback — latest mtime.
+  let latestFile: string | undefined;
+  let latestMtimeMs = -1;
+  for (const filePath of files) {
+    try {
+      const fileStat = await stat(filePath);
+      if (fileStat.mtimeMs > latestMtimeMs) {
+        latestMtimeMs = fileStat.mtimeMs;
+        latestFile = filePath;
+      }
+    } catch {
+      // skip
+    }
+  }
+  return latestFile;
+}
+
 export async function parseGeminiSession(
   cwd: string,
 ): Promise<Partial<AgentSession> & { sessionFile?: string }> {
