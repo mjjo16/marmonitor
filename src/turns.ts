@@ -435,7 +435,12 @@ export function parseGeminiConversationTurns(raw: string): SessionTurn[] {
       if (pending.startedAt === undefined) pending.startedAt = ts;
       if (ts !== undefined) pending.completedAt = ts;
       pending.texts.push(text);
-      pending.bundleParts.push(text);
+      // `bundleParts` intentionally untouched: Gemini chats JSON does not
+      // expose tool-call / tool-result as separately addressable blocks the
+      // way Claude/Codex jsonl does. Producing a "bundle" that's identical
+      // to `text` would be a dishonest no-op, so we leave `turn.bundle`
+      // undefined and let `turnTextForMode(turn, 'bundle')` fall back to
+      // `turn.text` (the documented degradation path).
     }
     // info / error / unknown — skip
   }

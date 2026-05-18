@@ -470,6 +470,24 @@ describe("parseGeminiConversationTurns", () => {
     assert.equal(turns[3].text, "별말씀을요.");
   });
 
+  it("does not populate bundle for assistant turns — Gemini bundle is a no-op (#62 F9)", () => {
+    // Gemini chats JSON has no separately-addressable tool_use / tool_result
+    // blocks like Claude/Codex, so a "bundle" mode would duplicate `text`.
+    // Leave turn.bundle undefined and let turnTextForMode fall back to text.
+    const raw = JSON.stringify({
+      messages: [
+        { type: "user", content: "q", timestamp: "2026-04-07T01:22:00.000Z" },
+        { type: "gemini", content: "a", timestamp: "2026-04-07T01:22:01.000Z" },
+      ],
+    });
+    const turns = parseGeminiConversationTurns(raw);
+    assert.equal(turns.length, 2);
+    assert.equal(turns[1].role, "assistant");
+    assert.equal(turns[1].text, "a");
+    assert.equal(turns[1].bundle, undefined);
+    assert.equal(turnTextForMode(turns[1], "bundle"), "a"); // falls back to text
+  });
+
   it("skips info/error/unknown message types", () => {
     const raw = JSON.stringify({
       messages: [
