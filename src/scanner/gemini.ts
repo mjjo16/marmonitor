@@ -142,7 +142,30 @@ export async function resolveGeminiChatFile(
   }
   if (files.length === 0) return undefined;
 
-  // Tier 1: sessionId match — open each file, return on first hit.
+  // Tier 0: filename fast-path. Gemini chats are written as
+  //   session-<YYYY-MM-DDTHH-MM>-<sessionId first 8 chars>.json
+  // so checking the basename against the sessionId prefix avoids reading
+  // every file. Verified against ~/.gemini/tmp/*/chats/session-*.json.
+  if (sessionId && sessionId.length >= 8) {
+    const prefix = sessionId.slice(0, 8);
+    const namedHit = files.find((filePath) => filePath.includes(`-${prefix}.json`));
+    if (namedHit) {
+      // Confirm by reading the sessionId field — filenames could collide on a
+      // short prefix, and a false positive here would route to the wrong chat.
+      try {
+        const raw = await readFile(namedHit, "utf-8");
+        const data = JSON.parse(raw) as { sessionId?: unknown };
+        if (typeof data.sessionId === "string" && data.sessionId === sessionId) {
+          return namedHit;
+        }
+      } catch {
+        // fall through to the content-scan tier
+      }
+    }
+  }
+
+  // Tier 1: sessionId match — open each file, return on first hit. Reached
+  // only when the filename fast-path missed (e.g. format drift or collision).
   if (sessionId) {
     for (const filePath of files) {
       try {
