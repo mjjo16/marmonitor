@@ -132,7 +132,7 @@ function parseClaudeUserMessage(
     .filter(Boolean);
 
   if (onlyToolResult) {
-    // bundle 모드에서 합쳐질 수 있도록 raw content를 살리되 prompt로는 안 셈
+    // Keep the raw content for bundle mode, but do not count it as a user prompt.
     return { text: "", isToolResult: true };
   }
   return textParts.length > 0 ? { text: textParts.join("\n\n"), isToolResult: false } : undefined;
@@ -195,10 +195,10 @@ export function parseClaudeConversationTurns(raw: string): SessionTurn[] {
       if (!parsed) continue;
 
       if (parsed.isToolResult) {
-        // tool_result는 진행 중인 assistant turn에 묶음으로 합쳐짐
+        // tool_result entries merge into the in-progress assistant turn.
         if (pending.bundleParts.length > 0 || pending.texts.length > 0) {
           const body = formatToolResult(
-            // 다시 추출 — bundle 형태로
+            // Re-extract the raw content into bundle form.
             { content: (message?.content as unknown) ?? [] },
           );
           if (body) pending.bundleParts.push(`[tool_result]\n${body}`);
