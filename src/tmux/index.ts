@@ -166,6 +166,36 @@ export async function getProcessTty(pid: number): Promise<string | undefined> {
   }
 }
 
+/** Batched variant of `getProcessTty` — one `lsof -p pid1,pid2,...` call
+ *  returns the controlling tty for every PID at once. Returns a Map keyed
+ *  by PID; PIDs with no tty (or lsof errors) are simply absent. lsof's `-F`
+ *  output is one field per line, with `p<pid>` markers preceding each
+ *  process's records, so we walk the lines with a running `currentPid` and
+ *  pair the next `n<path>` we see with it. */
+export async function getProcessTtys(pids: number[]): Promise<Map<number, string>> {
+  const result = new Map<number, string>();
+  if (pids.length === 0) return result;
+  try {
+    const { stdout } = await execFileAsync("lsof", ["-a", "-p", pids.join(","), "-d", "0", "-Fn"], {
+      timeout: 2000,
+    });
+    let currentPid: number | undefined;
+    for (const raw of stdout.split("\n")) {
+      const line = raw.trim();
+      if (line.startsWith("p")) {
+        const parsed = Number.parseInt(line.slice(1), 10);
+        currentPid = Number.isFinite(parsed) ? parsed : undefined;
+      } else if (currentPid !== undefined && line.startsWith("n/")) {
+        // Keep the first `n` field per pid (stdin's tty); ignore any extras.
+        if (!result.has(currentPid)) result.set(currentPid, line.slice(1));
+      }
+    }
+  } catch {
+    // partial output may still be useful if returned; otherwise empty map.
+  }
+  return result;
+}
+
 /** Find the agent PID that runs inside the currently active tmux pane.
  *
  *  Two-tier match:
@@ -192,12 +222,13 @@ export async function findActiveAgentPid(
     const treeMatch = agentPids.find((pid) => isPidInTree(activePanePid, pid, childMap));
     if (treeMatch !== undefined) return treeMatch;
 
-    // Tier 2: tty fallback
-    const paneTty = await getProcessTty(activePanePid);
+    // Tier 2: tty fallback — one batched lsof for the pane shell + all
+    // agent PIDs, instead of N+1 separate calls.
+    const ttys = await getProcessTtys([activePanePid, ...agentPids]);
+    const paneTty = ttys.get(activePanePid);
     if (!paneTty) return undefined;
     for (const agentPid of agentPids) {
-      const agentTty = await getProcessTty(agentPid);
-      if (agentTty && agentTty === paneTty) return agentPid;
+      if (ttys.get(agentPid) === paneTty) return agentPid;
     }
     return undefined;
   } catch {
