@@ -204,6 +204,7 @@ marmonitor restart      # 데몬 재시작 (예: npm 업데이트 후)
 |--------|------|
 | `prefix + a` | 어텐션 팝업 — 검토할 세션 선택 |
 | `prefix + j` | 점프 팝업 — 이동할 세션 선택 |
+| `prefix + y` | 활성 패널의 최신 AI 답변 턴 복사 |
 | `prefix + m` | 독 — 컴팩트 모니터 패널 |
 | `Option+1~5` | 어텐션 세션 #1~5로 바로 이동 |
 | `Option+`` | 이전 패널로 돌아가기 |
@@ -214,6 +215,7 @@ marmonitor restart      # 데몬 재시작 (예: npm 업데이트 후)
 marmonitor status       # 전체 세션 목록
 marmonitor attention    # 입력이 필요한 세션 확인
 marmonitor activity     # 각 세션의 활동 내역 (도구 호출 + 토큰)
+marmonitor copy-latest-turn   # 활성 tmux 패널의 최신 AI/user 턴 복사
 marmonitor watch        # 실시간 전체 화면 모니터
 marmonitor jump-back    # 마지막 점프 이전 패널로 복귀
 marmonitor help         # 모든 명령어 및 옵션
@@ -257,7 +259,7 @@ marmonitor activity --json           # JSON 출력
 [marmonitor-tmux](https://github.com/mjjo16/marmonitor-tmux) 플러그인이 tmux 설정을 자동으로 처리합니다:
 
 - 에이전트 뱃지와 어텐션 필이 포함된 2번째 상태 라인
-- 팝업, 점프, 독 키 바인딩
+- 팝업, 점프, 최신 턴 복사, 독 키 바인딩
 - Option+1~5 다이렉트 점프
 
 `@marmonitor-*` 옵션으로 원하는 대로 바꿀 수 있습니다. 자세한 내용은 [플러그인 README](https://github.com/mjjo16/marmonitor-tmux)를 참조하세요.
