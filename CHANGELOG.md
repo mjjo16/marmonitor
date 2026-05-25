@@ -2,6 +2,19 @@
 
 All notable changes to marmonitor are documented here.
 
+## [0.2.6] - 2026-05-25
+
+### Added
+- **One-keystroke turn copy** via `marmonitor copy-latest-turn`, with agent-specific turn parsing for Claude, Codex, and Gemini.
+- **Clipboard support** for latest-turn copy on macOS/Linux (`pbcopy`, `wl-copy`, `xclip`, `xsel` fallback chain).
+- **`alerts.tokens` toggle** so token/context alerts can be disabled independently from guard-driven security alerts.
+- **Gemini sessionId-aware chat resolution** for safer same-cwd turn-copy routing.
+
+### Fixed
+- Codex Desktop / VS Code Codex `app-server` backends are no longer misdetected as real Codex CLI sessions.
+- Token/context alerts no longer misfire on cumulative Codex `inputTokens` when `lastInputTokens` is unavailable.
+- Claude stale-session override is now more conservative when multiple sessions share the same cwd, preventing sibling misrouting.
+
 ## [0.2.5] - 2026-04-12
 
 ### Added
