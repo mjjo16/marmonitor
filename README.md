@@ -206,6 +206,7 @@ The daemon must be running for all other commands to work. `marmonitor setup tmu
 |----------|--------|
 | `prefix + a` | Attention popup — choose a session to review |
 | `prefix + j` | Jump popup — pick a session to jump to |
+| `prefix + y` | Copy the latest AI assistant turn from the active pane |
 | `prefix + m` | Dock — compact monitor pane |
 | `Option+1~5` | Direct jump to attention session #1~5 |
 | `Option+`` | Jump back to previous pane |
@@ -216,6 +217,7 @@ The daemon must be running for all other commands to work. `marmonitor setup tmu
 marmonitor status       # Full session inventory
 marmonitor attention    # What needs your input?
 marmonitor activity     # What did each session do? (tool calls + tokens)
+marmonitor copy-latest-turn   # Copy the latest AI/user turn from the active tmux pane
 marmonitor watch        # Live full-screen monitor
 marmonitor jump-back    # Return to pane before last jump
 marmonitor help         # All commands and options
@@ -259,7 +261,7 @@ Activity is collected automatically by the daemon and stored in `~/.config/marmo
 The [marmonitor-tmux](https://github.com/mjjo16/marmonitor-tmux) plugin handles all tmux setup automatically:
 
 - 2nd status line with agent badges and attention pills
-- Key bindings for popup, jump, and dock
+- Key bindings for popup, jump, latest-turn copy, and dock
 - Option+1~5 direct jump
 
 All settings are customizable via `@marmonitor-*` options. See the [plugin README](https://github.com/mjjo16/marmonitor-tmux) for details.
@@ -287,11 +289,13 @@ Useful commands:
 marmonitor alerts
 marmonitor alerts on
 marmonitor alerts off
+marmonitor alerts tokens on
+marmonitor alerts tokens off
 marmonitor alerts notify on
 marmonitor alerts notify off
 ```
 
-Desktop notifications can be enabled separately from alert collection. After changing alert settings, restart the daemon to apply them:
+Desktop notifications can be enabled separately from alert collection, and token/context alerts can be silenced without turning off security alerts. After changing alert settings, restart the daemon to apply them:
 
 ```bash
 marmonitor restart

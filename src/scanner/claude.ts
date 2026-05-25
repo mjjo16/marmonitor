@@ -504,9 +504,29 @@ async function readJsonlSessionMeta(
   }
 }
 
+/**
+ * Stale-session override resolver.
+ *
+ * Picks a non-current jsonl when the current sessionId's metadata is stale
+ * (e.g. just after /clear), but refuses to do so when the current jsonl
+ * clearly belongs to this process or when the candidate jsonl is already
+ * claimed in the registry. See local issue #103 / GH #56 for the misrouting
+ * case this guards.
+ *
+ * Conservative guards layered on top of the legacy mtime-lead check:
+ *  - F1: if currentDirectPath exists and its first-line timestamp is on or
+ *        after processStartedAt, the current jsonl was authored by this
+ *        process — keep it, do not override.
+ *  - F2: if the override-candidate sessionId is already direct-bound in
+ *        claudeSessionRegistry, refuse the override. Keeps the
+ *        one-jsonl-per-sessionId invariant intact.
+ *  - F3: anything ambiguous falls through to `undefined` (unresolved) —
+ *        a missed match is safer than a misrouted one.
+ */
 async function chooseStaleSessionOverride(
   processCwd: string,
   currentSessionId: string | undefined,
+  processStartedAt: number | undefined,
   config?: MarmonitorConfig,
 ): Promise<{ sessionId: string; cwd?: string; timestamp?: string; filePath: string } | undefined> {
   const projectDirName = await findClaudeProjectDir(processCwd, currentSessionId, config);
@@ -531,23 +551,43 @@ async function chooseStaleSessionOverride(
       : undefined;
 
   if (currentDirectPath) {
+    let currentStat: Awaited<ReturnType<typeof stat>>;
+    let recentStat: Awaited<ReturnType<typeof stat>>;
     try {
-      const [recentStat, currentStat] = await Promise.all([
-        stat(recentPath),
-        stat(currentDirectPath),
-      ]);
-      const minLeadMs = 5 * 60 * 1000;
-      const staleGapMs = 30 * 60 * 1000;
-      if (recentStat.mtimeMs - currentStat.mtimeMs < minLeadMs) return undefined;
-      if (Date.now() - currentStat.mtimeMs < staleGapMs) return undefined;
+      [recentStat, currentStat] = await Promise.all([stat(recentPath), stat(currentDirectPath)]);
     } catch {
       return undefined;
     }
+
+    // F1: a non-empty current jsonl whose first event is on or after the
+    // process start belongs to this process. Same-cwd sibling sessions land
+    // here and must not be routed onto another session's active jsonl.
+    if (currentStat.size > 0 && processStartedAt !== undefined) {
+      const currentMeta = await readJsonlSessionMeta(currentDirectPath);
+      if (currentMeta?.timestamp) {
+        const jsonlCreatedAtSec = new Date(currentMeta.timestamp).getTime() / 1000;
+        if (Number.isFinite(jsonlCreatedAtSec)) {
+          const CLOCK_SKEW_SEC = 60;
+          if (jsonlCreatedAtSec >= processStartedAt - CLOCK_SKEW_SEC) return undefined;
+        }
+      }
+    }
+
+    const minLeadMs = 5 * 60 * 1000;
+    const staleGapMs = 30 * 60 * 1000;
+    if (recentStat.mtimeMs - currentStat.mtimeMs < minLeadMs) return undefined;
+    if (Date.now() - currentStat.mtimeMs < staleGapMs) return undefined;
   }
 
   const recentMeta = await readJsonlSessionMeta(recentPath);
   if (!recentMeta?.sessionId) return undefined;
   if (recentMeta.sessionId === currentSessionId) return undefined;
+
+  // F2: the candidate sessionId is already direct-bound in the registry.
+  // Overriding would let two sessionIds share one jsonl — the exact bug
+  // in #103. Keeps the one-jsonl-per-sessionId invariant.
+  const recentBinding = claudeSessionRegistry.get(recentMeta.sessionId);
+  if (recentBinding?.binding === "direct") return undefined;
 
   return {
     sessionId: recentMeta.sessionId,
@@ -716,7 +756,12 @@ export async function parseClaudeSession(
       let resolvedStartedAt = sessionStartedAt;
 
       if (processCwd && processCwd !== "unknown") {
-        const override = await chooseStaleSessionOverride(processCwd, data.sessionId, config);
+        const override = await chooseStaleSessionOverride(
+          processCwd,
+          data.sessionId,
+          processStartedAt,
+          config,
+        );
         if (override) {
           resolvedSessionId = override.sessionId;
           resolvedCwd = override.cwd ?? processCwd;

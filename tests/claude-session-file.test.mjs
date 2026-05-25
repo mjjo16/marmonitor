@@ -301,6 +301,166 @@ describe("parseClaudeSession", () => {
   });
 });
 
+describe("chooseStaleSessionOverride conservative guards (#103)", () => {
+  it("F1: does not misroute dormant same-cwd session to active sibling jsonl", async () => {
+    // Reproduces local issue #103 / GH #56 deterministically.
+    // Two Claude sessions share cwd. The dormant one (current) has its own
+    // jsonl whose first-line timestamp matches its processStartedAt. The
+    // active sibling's jsonl is newer by 56min and the dormant's mtime is
+    // older than 30min — exactly the case where the legacy mtime check would
+    // override. F1 must short-circuit on processStartedAt parity.
+    claudeSessionRegistry.clear();
+    claudeProjectDirCache.clear();
+
+    const root = join(tmpdir(), `marmonitor-claude-103-f1-${Date.now()}`);
+    const cwd = join(root, "shared");
+    const projectsRoot = join(root, "projects");
+    const sessionsRoot = join(root, "sessions");
+    const projectDir = join(projectsRoot, encodeClaudeProjectDir(cwd));
+    const dormantPid = 48477;
+    const sessionMetaPath = join(sessionsRoot, `${dormantPid}.json`);
+    const dormantPath = join(projectDir, "abd04dd5.jsonl");
+    const activePath = join(projectDir, "048c0eb5.jsonl");
+    const nowSec = Math.floor(Date.now() / 1000);
+    // Dormant process started 2h ago; its jsonl first-line carries the same
+    // creation time (well within F1's clock-skew window).
+    const dormantStartedAt = nowSec - 2 * 3600;
+    const dormantTs = new Date(dormantStartedAt * 1000).toISOString();
+    // Active sibling started 1h ago; its jsonl is the newest in the dir.
+    const activeStartedAt = nowSec - 3600;
+    const activeTs = new Date(activeStartedAt * 1000).toISOString();
+
+    await mkdir(projectDir, { recursive: true });
+    await mkdir(sessionsRoot, { recursive: true });
+    await writeFile(
+      dormantPath,
+      `${[
+        JSON.stringify({ type: "permission-mode", sessionId: "abd04dd5" }),
+        JSON.stringify({ type: "user", cwd, sessionId: "abd04dd5", timestamp: dormantTs }),
+      ].join("\n")}\n`,
+      "utf-8",
+    );
+    await writeFile(
+      activePath,
+      `${[
+        JSON.stringify({ type: "permission-mode", sessionId: "048c0eb5" }),
+        JSON.stringify({ type: "user", cwd, sessionId: "048c0eb5", timestamp: activeTs }),
+      ].join("\n")}\n`,
+      "utf-8",
+    );
+    // Dormant jsonl mtime: 1h45m ago (well past 30min staleness window).
+    const dormantMtime = new Date((nowSec - 1.75 * 3600) * 1000);
+    await utimes(dormantPath, dormantMtime, dormantMtime);
+    // Active sibling jsonl mtime: 49min ago — 56min newer than dormant.
+    const activeMtime = new Date((nowSec - 49 * 60) * 1000);
+    await utimes(activePath, activeMtime, activeMtime);
+    await writeFile(
+      sessionMetaPath,
+      JSON.stringify({
+        pid: dormantPid,
+        sessionId: "abd04dd5",
+        cwd,
+        startedAt: dormantStartedAt * 1000,
+      }),
+      "utf-8",
+    );
+
+    const defaults = getDefaults();
+    const config = {
+      ...defaults,
+      paths: {
+        ...defaults.paths,
+        claudeProjects: [projectsRoot],
+        claudeSessions: [sessionsRoot],
+      },
+    };
+
+    try {
+      const parsed = await parseClaudeSession(dormantPid, cwd, dormantStartedAt, config);
+      // Without F1, parsed.sessionId would have become "048c0eb5" (the active
+      // sibling) — exactly the misrouting reported in #103.
+      assert.equal(parsed.sessionId, "abd04dd5");
+    } finally {
+      claudeSessionRegistry.clear();
+      claudeProjectDirCache.clear();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("F2: does not override onto a sessionId already direct-bound to another live PID", async () => {
+    // Even if the dormant jsonl is missing (currentDirectPath undefined, so
+    // F1 cannot apply), F2 must still refuse when the active sibling's
+    // sessionId already has a direct binding registered.
+    claudeSessionRegistry.clear();
+    claudeProjectDirCache.clear();
+
+    const root = join(tmpdir(), `marmonitor-claude-103-f2-${Date.now()}`);
+    const cwd = join(root, "shared");
+    const projectsRoot = join(root, "projects");
+    const sessionsRoot = join(root, "sessions");
+    const projectDir = join(projectsRoot, encodeClaudeProjectDir(cwd));
+    const dormantPid = 22222;
+    const sessionMetaPath = join(sessionsRoot, `${dormantPid}.json`);
+    const activePath = join(projectDir, "active.jsonl");
+    const nowSec = Math.floor(Date.now() / 1000);
+    const activeTs = new Date((nowSec - 60) * 1000).toISOString();
+
+    await mkdir(projectDir, { recursive: true });
+    await mkdir(sessionsRoot, { recursive: true });
+    // No dormant jsonl on disk (dormant sessionId points to a missing file).
+    await writeFile(
+      activePath,
+      `${[
+        JSON.stringify({ type: "permission-mode", sessionId: "active" }),
+        JSON.stringify({ type: "user", cwd, sessionId: "active", timestamp: activeTs }),
+      ].join("\n")}\n`,
+      "utf-8",
+    );
+    await writeFile(
+      sessionMetaPath,
+      JSON.stringify({
+        pid: dormantPid,
+        sessionId: "dormant",
+        cwd,
+        startedAt: (nowSec - 3600) * 1000,
+      }),
+      "utf-8",
+    );
+
+    // Simulate another live PID already holding the active jsonl direct-bound.
+    claudeSessionRegistry.set("active", {
+      filePath: activePath,
+      sessionId: "active",
+      cwd,
+      firstSeenOffset: 0,
+      startedAt: nowSec - 60,
+      source: "claude",
+      binding: "direct",
+    });
+
+    const defaults = getDefaults();
+    const config = {
+      ...defaults,
+      paths: {
+        ...defaults.paths,
+        claudeProjects: [projectsRoot],
+        claudeSessions: [sessionsRoot],
+      },
+    };
+
+    try {
+      const parsed = await parseClaudeSession(dormantPid, cwd, nowSec - 3600, config);
+      // Override blocked by F2 → dormant session keeps its (stale) sessionId,
+      // which is the conservative outcome ("unresolved is safer than misrouted").
+      assert.equal(parsed.sessionId, "dormant");
+    } finally {
+      claudeSessionRegistry.clear();
+      claudeProjectDirCache.clear();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("matchClaudeSessionByMtime", () => {
   it("returns undefined when two files have timestamps within 5 minutes of each other (ambiguous)", async () => {
     claudeSessionRegistry.clear();

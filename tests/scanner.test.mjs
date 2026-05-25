@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { getDefaults } from "../dist/config/index.js";
 import { setCodexIndexCache } from "../dist/scanner/cache.js";
-import { indexCodexSessions } from "../dist/scanner/codex.js";
+import { indexCodexSessions, mergeCodexIndexedSessions } from "../dist/scanner/codex.js";
 import {
   detectAgentFromProcessSignature,
   parseGeminiSessionContent,
@@ -74,6 +74,32 @@ describe("detectAgentFromProcessSignature", () => {
     );
   });
 
+  it("does not match Codex `app-server` backends from Desktop or VS Code", () => {
+    // Codex Desktop and the VS Code Codex extension spawn the real codex
+    // binary in `app-server` mode as an RPC backend — not an interactive
+    // session — so it must not show up as a CLI agent.
+    assert.equal(
+      detectAgentFromProcessSignature(
+        {
+          name: "node",
+          cmd: "/home/sam/.asdf/installs/nodejs/24.13.0/bin/node /home/sam/.npm-global/bin/codex app-server --analytics-default-enabled",
+        },
+        config,
+      ),
+      null,
+    );
+    assert.equal(
+      detectAgentFromProcessSignature(
+        {
+          name: "codex",
+          cmd: "/home/sam/.npm-global/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/codex/codex app-server --analytics-default-enabled",
+        },
+        config,
+      ),
+      null,
+    );
+  });
+
   it("does not falsely match unrelated node processes", () => {
     assert.equal(
       detectAgentFromProcessSignature(
@@ -85,6 +111,19 @@ describe("detectAgentFromProcessSignature", () => {
     assert.equal(
       detectAgentFromProcessSignature(
         { name: "node", cmd: "/some/path/gemini-other-tool --watch" },
+        config,
+      ),
+      null,
+    );
+  });
+
+  it("does not treat VS Code Codex app-server processes as trackable agent sessions", () => {
+    assert.equal(
+      detectAgentFromProcessSignature(
+        {
+          name: "codex",
+          cmd: "/Users/me/.vscode/extensions/openai.chatgpt/bin/macos-aarch64/codex app-server --analytics-default-enabled",
+        },
         config,
       ),
       null,
@@ -249,6 +288,70 @@ describe("propagateWorkerStateToParent", () => {
 });
 
 describe("indexCodexSessions", () => {
+  it("merges sqlite and jsonl Codex sessions so fresh rollout-only sessions are preserved", () => {
+    const merged = mergeCodexIndexedSessions(
+      [
+        {
+          id: "sqlite-only",
+          cwd: "/tmp/sqlite-only",
+          filePath: "/tmp/sqlite-only.jsonl",
+          timestamp: 100,
+          lastActivityAt: 130,
+        },
+        {
+          id: "shared",
+          cwd: "/tmp/shared",
+          filePath: "/tmp/shared-sqlite.jsonl",
+          timestamp: 200,
+          lastActivityAt: 220,
+          totalTokenUsage: {
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 10,
+          },
+        },
+      ],
+      [
+        {
+          id: "shared",
+          cwd: "/tmp/shared",
+          filePath: "/tmp/shared-jsonl.jsonl",
+          timestamp: 180,
+          lastActivityAt: 240,
+          totalTokenUsage: {
+            input_tokens: 11,
+            cached_input_tokens: 2,
+            output_tokens: 3,
+            total_tokens: 16,
+          },
+          model: "gpt-5.4",
+        },
+        {
+          id: "jsonl-only",
+          cwd: "/tmp/jsonl-only",
+          filePath: "/tmp/jsonl-only.jsonl",
+          timestamp: 300,
+          lastActivityAt: 310,
+        },
+      ],
+    );
+
+    assert.deepEqual(
+      merged.map((session) => session.id),
+      ["jsonl-only", "shared", "sqlite-only"],
+    );
+    assert.equal(
+      merged.find((session) => session.id === "shared")?.filePath,
+      "/tmp/shared-jsonl.jsonl",
+    );
+    assert.equal(merged.find((session) => session.id === "shared")?.timestamp, 180);
+    assert.equal(
+      merged.find((session) => session.id === "shared")?.totalTokenUsage?.total_tokens,
+      16,
+    );
+  });
+
   it("records lastActivityAt from the session file mtime", async () => {
     const now = new Date();
     const yyyy = now.getFullYear().toString();

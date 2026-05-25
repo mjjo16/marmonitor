@@ -102,6 +102,8 @@ export interface MarmonitorConfig {
     desktop: boolean;
     /** alerts.log 파일 기록 */
     log: boolean;
+    /** 토큰/컨텍스트 임계 알림 카테고리 토글. 보안 알림과 분리 가능. 기본 true */
+    tokens: boolean;
     /** 컨텍스트 경고 임계값 (0~1). 0 = 비활성화. 기본 1.0 (비활성) */
     contextWarnThreshold: number;
     /** 컨텍스트 위험 임계값 (0~1). 기본 0.85 */
@@ -191,9 +193,10 @@ const DEFAULTS: MarmonitorConfig = {
     activityRetentionDays: 7,
   },
   alerts: {
-    enabled: true,
-    desktop: true,
-    log: true,
+    enabled: false,
+    desktop: false,
+    log: false,
+    tokens: true, // 활성 시 토큰/컨텍스트 임계 알림 발사. 보안 알림은 별도 게이트 없음
     contextWarnThreshold: 1.0, // 기본 비활성 (0.70으로 설정 시 활성화)
     contextCritThreshold: 0.85,
   },
