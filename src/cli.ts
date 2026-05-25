@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
 import { renderInstallBanner, renderRuntimeBanner } from "./banner/index.js";
+import { ClipboardError, writeClipboard } from "./clipboard.js";
 import {
   getConfigDir,
   getConfigSearchPaths,
@@ -43,10 +44,10 @@ import {
   selectUnmatchedTargets,
 } from "./output/utils.js";
 import { TERMINAL_RESTORE_SEQUENCE, formatProcessFailure } from "./process-safety.js";
-import { detectClaudePhase } from "./scanner/claude.js";
+import { detectClaudePhase, resolveClaudeSessionFile } from "./scanner/claude.js";
 import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./scanner/codex.js";
 import { isDaemonRunning, readDaemonPid, readDaemonSnapshot } from "./scanner/daemon-utils.js";
-import { parseGeminiSession } from "./scanner/gemini.js";
+import { parseGeminiSession, resolveGeminiChatFile } from "./scanner/gemini.js";
 import { scanAgents } from "./scanner/index.js";
 import { loadRegistryFromFile } from "./scanner/session-registry.js";
 import { detectCliStdoutPhase } from "./scanner/status.js";
@@ -1659,6 +1660,178 @@ program
     await stopDaemon();
     await startDaemon();
     process.exit(0);
+  });
+
+// ── copy-latest-turn command ─────────────────────────────────────────────────
+
+program
+  .command("copy-latest-turn")
+  .description(
+    "Copy the most recent AI turn of the active tmux pane to the clipboard (Claude / Codex / Gemini)",
+  )
+  .option("--role <role>", "Which turn to copy: assistant (default) or user", "assistant")
+  .option("--mode <mode>", "Extraction mode: text (default) or bundle", "text")
+  .option(
+    "--pane-pid <pid>",
+    "Override active pane PID (default: tmux active pane). Useful for tmux key bindings that pass #{pane_pid}.",
+  )
+  .option("--stdout", "Print the turn to stdout instead of copying to clipboard")
+  .option("--config <path>", "Path to settings.json")
+  .action(async (opts) => {
+    const {
+      parseClaudeConversationTurns,
+      parseCodexConversationTurns,
+      parseGeminiConversationTurns,
+      selectLatestTurn,
+      turnTextForMode,
+    } = await import("./turns.js");
+
+    const role: "assistant" | "user" = opts.role === "user" ? "user" : "assistant";
+    const mode: "text" | "bundle" = opts.mode === "bundle" ? "bundle" : "text";
+
+    const agents = await requireDaemonSnapshot();
+
+    let agent: AgentSession | undefined;
+    let panePidOverridden = false;
+    if (typeof opts.panePid === "string") {
+      const panePid = Number.parseInt(opts.panePid, 10);
+      if (!Number.isFinite(panePid)) {
+        console.error(`Invalid --pane-pid value: ${opts.panePid}`);
+        process.exit(1);
+      }
+      panePidOverridden = true;
+      const agentPids = agents.map((a) => a.pid);
+      const matchedPid = await findActiveAgentPid(agentPids, panePid);
+      if (matchedPid !== undefined) {
+        agent = agents.find((a) => a.pid === matchedPid);
+      }
+    } else {
+      // Active tmux pane fallback
+      const agentPids = agents.map((a) => a.pid);
+      const matchedPid = await findActiveAgentPid(agentPids);
+      if (matchedPid !== undefined) {
+        agent = agents.find((a) => a.pid === matchedPid);
+      }
+    }
+
+    if (!agent) {
+      console.error(
+        panePidOverridden
+          ? `No AI session matched the given pane PID (${opts.panePid}).`
+          : "No AI session in this tmux pane. Switch to a Claude pane and try again.",
+      );
+      process.exit(1);
+    }
+
+    const config = await loadConfig(resolveConfigPath(opts));
+
+    // Resolve the agent-specific source file and parse to SessionTurn[].
+    let sessionFile: string | undefined;
+    let turns: ReturnType<typeof parseClaudeConversationTurns> = [];
+
+    if (agent.agentName === "Claude Code") {
+      // Trust the daemon snapshot's per-PID sessionId. Earlier we tried a
+      // cwd-keyed live re-resolve here (F1, see #62 review), but that lost
+      // PID identity when two Claude sessions share the same cwd —
+      // `matchClaudeSessionByMtime` returned whichever jsonl scored best by
+      // cwd alone, so `prefix+y` in pane A could copy pane B's turn. The
+      // narrower `/resume` staleness concern that motivated F1 is tracked
+      // separately under #107 (daemon snapshot freshness).
+      if (!agent.sessionId) {
+        console.error("Active Claude session has no sessionId yet — try again in a moment.");
+        process.exit(1);
+      }
+      sessionFile = await resolveClaudeSessionFile(
+        agent.sessionId,
+        agent.cwd,
+        agent.startedAt,
+        config,
+      );
+      if (!sessionFile) {
+        console.error("Claude session file not found for this pane.");
+        process.exit(1);
+      }
+      const raw = await readFile(sessionFile, "utf-8");
+      turns = parseClaudeConversationTurns(raw);
+    } else if (agent.agentName === "Codex") {
+      // Mirror scanner's session resolution priority: persistent binding
+      // registry (PID × processStartedAt → rollout) first, fallback to
+      // cwd + processStartedAt matching. Same-cwd multi-Codex environments
+      // would otherwise route to the wrong rollout file.
+      const codexSessions = await indexCodexSessions(config, { activeCwds: [agent.cwd] });
+      const { loadCodexBindingRegistryFromFile, selectCodexBindingSession } = await import(
+        "./scanner/codex-binding-registry.js"
+      );
+      const bindingRegistry = new Map();
+      await loadCodexBindingRegistryFromFile(
+        join(getConfigDir(), "codex-binding-registry.json"),
+        bindingRegistry,
+      );
+      const matched =
+        selectCodexBindingSession(
+          bindingRegistry,
+          agent.pid,
+          agent.processStartedAt,
+          agent.cwd,
+          codexSessions,
+        ) ?? matchCodexSession(agent.cwd, agent.processStartedAt, codexSessions);
+      if (!matched?.filePath) {
+        console.error("Codex rollout file not found for this pane.");
+        process.exit(1);
+      }
+      sessionFile = matched.filePath;
+      const raw = await readFile(sessionFile, "utf-8");
+      turns = parseCodexConversationTurns(raw);
+    } else if (agent.agentName === "Gemini") {
+      // Match the snapshot's sessionId against on-disk Gemini chats first so
+      // multi-session same-cwd environments don't fall back to "latest mtime
+      // wins". parseGeminiSession (latest mtime) remains as a graceful fallback.
+      sessionFile = await resolveGeminiChatFile(agent.cwd, agent.sessionId);
+      if (!sessionFile) {
+        const gemini = await parseGeminiSession(agent.cwd);
+        sessionFile = gemini.sessionFile;
+      }
+      if (!sessionFile) {
+        console.error("Gemini chat file not found for this pane.");
+        process.exit(1);
+      }
+      const raw = await readFile(sessionFile, "utf-8");
+      turns = parseGeminiConversationTurns(raw);
+    } else {
+      console.error(`Turn copy is not supported for ${agent.agentName} yet.`);
+      process.exit(1);
+    }
+
+    const turn = selectLatestTurn(turns, role);
+    if (!turn) {
+      console.error(`No recent ${role} turn found in this ${agent.agentName} session.`);
+      process.exit(1);
+    }
+
+    const text = turnTextForMode(turn, mode);
+    if (!text) {
+      console.error(`Latest ${role} turn has no ${mode === "bundle" ? "bundle" : "text"} content.`);
+      process.exit(1);
+    }
+
+    if (opts.stdout) {
+      console.log(text);
+      return;
+    }
+
+    try {
+      await writeClipboard(text);
+      const chars = text.length;
+      const label = role === "assistant" ? "AI" : "user";
+      console.log(`marmonitor: copied ${label} turn (${chars} chars)`);
+    } catch (err) {
+      if (err instanceof ClipboardError) {
+        console.error(err.message);
+      } else {
+        console.error(`Clipboard copy failed: ${(err as Error).message}. Try --stdout instead.`);
+      }
+      process.exit(1);
+    }
   });
 
 installProcessSafetyHandlers();
