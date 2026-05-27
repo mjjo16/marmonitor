@@ -19,6 +19,8 @@ import {
 } from "../output/utils.js";
 import type { AgentSession, SessionPhase, TokenUsage } from "../types.js";
 import {
+  CLAUDE_MATCH_GAP_SEC,
+  CLAUDE_MATCH_TOP_DELTA_SEC,
   CLAUDE_PHASE_RECENT_LINES,
   CLAUDE_SESSION_AMBIGUITY_GAP_SEC,
   CLAUDE_SESSION_MTIME_MATCH_SEC,
@@ -602,17 +604,26 @@ async function chooseStaleSessionOverride(
  * When processStartedAt is available, matches by JSONL creation timestamp
  * (first-line timestamp) proximity to process start time.
  * Falls back to the most recently modified JSONL when no start time is available.
+ *
+ * Fail-closed dual threshold (local issue #108): a candidate is accepted only
+ * when (a) its proximity to processStartedAt is within CLAUDE_MATCH_TOP_DELTA_SEC
+ * AND (b) it dominates the runner-up by at least CLAUDE_MATCH_GAP_SEC. When
+ * cycleClaimedSessionIds is supplied, any session already bound to another PID
+ * in this scan cycle is excluded from the candidate pool — without this, two
+ * same-cwd Claude PIDs whose lstart falls in the same second tiebreak onto the
+ * same jsonl and the daemon snapshot collapses both PIDs onto one sessionId.
  */
 export async function matchClaudeSessionByMtime(
   cwd: string,
   processStartedAt: number | undefined,
   config?: MarmonitorConfig,
+  cycleClaimedSessionIds?: Set<string>,
 ): Promise<Partial<AgentSession> | undefined> {
   const projectDirName = await findClaudeProjectDir(cwd, undefined, config);
   if (!projectDirName) return undefined;
 
   const projectRoots = getClaudeProjectRoots(config);
-  const candidates: Array<{ path: string; mtimeMs: number }> = [];
+  const candidates: Array<{ path: string; mtimeMs: number; sessionId: string }> = [];
 
   for (const projectsDir of projectRoots) {
     const projectDir = join(projectsDir, projectDirName);
@@ -621,10 +632,14 @@ export async function matchClaudeSessionByMtime(
       const files = await readdir(projectDir);
       for (const file of files) {
         if (!file.endsWith(".jsonl")) continue;
+        // Basename without ".jsonl" is the sessionId on disk; we use it to
+        // skip files already claimed by another PID in this scan cycle.
+        const sessionId = basename(file, ".jsonl");
+        if (cycleClaimedSessionIds?.has(sessionId)) continue;
         try {
           const filePath = join(projectDir, file);
           const fileStat = await stat(filePath);
-          candidates.push({ path: filePath, mtimeMs: fileStat.mtimeMs });
+          candidates.push({ path: filePath, mtimeMs: fileStat.mtimeMs, sessionId });
         } catch {
           // skip
         }
@@ -660,17 +675,25 @@ export async function matchClaudeSessionByMtime(
     }
 
     if (scored.length > 0) {
-      // Pick the JSONL whose creation time is closest to process start
       scored.sort((a, b) => a.deltaSec - b.deltaSec);
-      // Only accept if within reasonable tolerance (5 minutes)
-      if (scored[0].deltaSec <= 300) {
-        bestPath = scored[0].path;
+      const top = scored[0];
+      const second = scored[1];
+      // Require (a) top close enough AND (b) dominant over the runner-up.
+      // Without (b), two near-simultaneous Claude starts in the same cwd
+      // both land on whichever jsonl wins the tiebreak — same-sessionId
+      // collapse in the daemon snapshot. With (a)+(b), ambiguous matches
+      // are deferred to a later scan cycle (snapshot sessionId stays
+      // unset; CLI surfaces "session not ready") instead of misrouting.
+      const dominates = !second || second.deltaSec - top.deltaSec >= CLAUDE_MATCH_GAP_SEC;
+      if (top.deltaSec <= CLAUDE_MATCH_TOP_DELTA_SEC && dominates) {
+        bestPath = top.path;
       }
-    }
-
-    // Fallback: no timestamp-scored match — only commit if one file clearly leads
-    // to avoid mismatching when multiple sessions share the same cwd.
-    if (!bestPath) {
+      // Intentional fail-closed: if scored produced a result that does not
+      // pass the dual threshold, do NOT fall back to mtime — fallback is
+      // reserved for the case where no jsonl carries a timestamp at all.
+    } else {
+      // Fallback: no timestamp-scored match — only commit if one file clearly
+      // leads by mtime to avoid mismatching when multiple sessions share cwd.
       pool.sort((a, b) => b.mtimeMs - a.mtimeMs);
       const latest = pool[0];
       const second = pool[1];
@@ -733,12 +756,16 @@ export async function matchClaudeSessionByMtime(
   }
 }
 
-/** Parse Claude Code session file for enriched data */
+/** Parse Claude Code session file for enriched data.
+ *  cycleClaimedSessionIds (#108): per-scan-cycle Set of sessionIds already
+ *  bound to another PID. Threaded to matchClaudeSessionByMtime so same-cwd
+ *  multi-PID environments cannot collapse onto a single sessionId. */
 export async function parseClaudeSession(
   pid: number,
   cwd?: string,
   processStartedAt?: number,
   config?: MarmonitorConfig,
+  cycleClaimedSessionIds?: Set<string>,
 ): Promise<Partial<AgentSession>> {
   // 1st: try legacy sessions/{pid}.json
   const sessionFile = getClaudeSessionRoots(config)
@@ -807,7 +834,12 @@ export async function parseClaudeSession(
 
   // 2nd: match by JSONL mtime in project directory
   if (cwd && cwd !== "unknown") {
-    const matched = await matchClaudeSessionByMtime(cwd, processStartedAt, config);
+    const matched = await matchClaudeSessionByMtime(
+      cwd,
+      processStartedAt,
+      config,
+      cycleClaimedSessionIds,
+    );
     if (matched) return matched;
   }
 

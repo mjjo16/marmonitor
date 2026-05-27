@@ -70,6 +70,23 @@ export async function scanAgents(
   const sessionRegistry = options.sessionRegistry;
   const seenPids = new Set<number>();
 
+  // #108: cycle-local guard against same-cwd Claude PID collisions. A
+  // sessionId bound to one PID is excluded from later parseClaudeSession
+  // candidate pools in the same scan cycle, so two PIDs whose lstart
+  // collides in the same second cannot collapse onto the same sessionId.
+  // The mutex serializes the matching step itself — without it, parallel
+  // promises would each race the claim Set before either could update it.
+  const cycleClaimedClaudeSessionIds = new Set<string>();
+  let claudeMatchTail: Promise<void> = Promise.resolve();
+  const withClaudeMatchLock = <T>(fn: () => Promise<T>): Promise<T> => {
+    const prev = claudeMatchTail;
+    let releaseLock: () => void = () => {};
+    claudeMatchTail = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    return prev.then(fn).finally(releaseLock);
+  };
+
   perfStart("scanAgents");
 
   // 1. Find running processes
@@ -197,7 +214,22 @@ export async function scanAgents(
       // Get cwd and start time early so mtime-based matching can use them
       const processCwd = (await getProcessCwd(proc.pid)) ?? undefined;
       const processStartTime = await getProcessStartTime(proc.pid);
-      const claudeData = await parseClaudeSession(proc.pid, processCwd, processStartTime, config);
+      // #108: serialize Claude matches and pass the cycle-claim Set in so
+      // each PID's match step sees previously bound sessionIds and skips
+      // them. parseClaudeSession adds to the Set itself is not enough —
+      // a race window between read & add would still let two PIDs win the
+      // same sessionId; the mutex closes that window.
+      const claudeData = await withClaudeMatchLock(async () => {
+        const result = await parseClaudeSession(
+          proc.pid,
+          processCwd,
+          processStartTime,
+          config,
+          cycleClaimedClaudeSessionIds,
+        );
+        if (result.sessionId) cycleClaimedClaudeSessionIds.add(result.sessionId);
+        return result;
+      });
       if (claudeData.cwd) cwd = claudeData.cwd;
       if (cwd === "unknown") cwd = processCwd ?? "unknown";
       sessionId = claudeData.sessionId;
