@@ -24,7 +24,11 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { getDefaults } from "../dist/config/index.js";
 import { claudeProjectDirCache, claudeSessionRegistry } from "../dist/scanner/cache.js";
-import { matchClaudeSessionByMtime } from "../dist/scanner/claude.js";
+import {
+  matchClaudeSessionByMtime,
+  matchClaudeSessionsByMtime,
+  parseClaudeSession,
+} from "../dist/scanner/claude.js";
 
 function encodeClaudeProjectDir(cwd) {
   return cwd.replace(/[/.]/g, "-");
@@ -89,6 +93,16 @@ describe("matchClaudeSessionByMtime — same-cwd collision (#108)", () => {
       const r2 = await matchClaudeSessionByMtime(cwd, epochB, config);
       assert.equal(r1?.sessionId, sidA, "proc_A lstart=tsA → sidA");
       assert.equal(r2?.sessionId, sidB, "proc_B lstart=tsB → sidB");
+
+      const batch = await matchClaudeSessionsByMtime(
+        [
+          { pid: 101, cwd, processStartedAt: epochA },
+          { pid: 102, cwd, processStartedAt: epochB },
+        ],
+        config,
+      );
+      assert.equal(batch.get(101)?.sessionId, sidA);
+      assert.equal(batch.get(102)?.sessionId, sidB);
     } finally {
       clearAllCaches();
       await rm(root, { recursive: true, force: true });
@@ -160,6 +174,36 @@ describe("matchClaudeSessionByMtime — same-cwd collision (#108)", () => {
     }
   });
 
+  it("scenario 3: batch matching is input-order independent and refuses both ambiguous owners", async () => {
+    clearAllCaches();
+    const root = join(tmpdir(), `marm-collision-s3-batch-${Date.now()}`);
+    const cwd = join(root, "shared");
+    const sidA = "33333333-aaaa-aaaa-aaaa-333333333333";
+    const sidB = "44444444-bbbb-bbbb-bbbb-444444444444";
+    const projectsRoot = await setupTwoSessions(root, cwd, [
+      { sessionId: sidA, isoTs: "2026-05-27T10:00:30.000Z" },
+      { sessionId: sidB, isoTs: "2026-05-27T10:00:01.000Z" },
+    ]);
+    const config = makeConfig(projectsRoot);
+    const requests = [
+      { pid: 101, cwd, processStartedAt: new Date("2026-05-27T10:00:00.000Z").getTime() / 1000 },
+      { pid: 102, cwd, processStartedAt: new Date("2026-05-27T10:00:01.000Z").getTime() / 1000 },
+    ];
+
+    try {
+      const forward = await matchClaudeSessionsByMtime(requests, config);
+      const reverse = await matchClaudeSessionsByMtime([...requests].reverse(), config);
+      // sidB is only one second closer to PID 102 than PID 101. With
+      // lstart's one-second precision that is insufficient evidence to assign
+      // either owner, so the result must be safely identical in either order.
+      assert.equal(forward.size, 0);
+      assert.equal(reverse.size, 0);
+    } finally {
+      clearAllCaches();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("scenario 4: two jsonls <1s apart → refuse (gap below dominance threshold)", async () => {
     clearAllCaches();
     const root = join(tmpdir(), `marm-collision-s4-${Date.now()}`);
@@ -216,6 +260,95 @@ describe("matchClaudeSessionByMtime — same-cwd collision (#108)", () => {
       // proc_B winds up unbound here (sidB is 10min away from epochA, beyond
       // the top threshold) — that is the correct conservative outcome.
       assert.equal(r2, undefined, "proc_B unbound is preferred over misrouting");
+    } finally {
+      clearAllCaches();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("legacy PID metadata refuses a sessionId already claimed by another PID", async () => {
+    clearAllCaches();
+    const root = join(tmpdir(), `marm-collision-legacy-claim-${Date.now()}`);
+    const cwd = join(root, "shared");
+    const sessionsRoot = join(root, "sessions");
+    const sessionId = "99999999-aaaa-aaaa-aaaa-999999999999";
+    const startedAt = Math.floor(Date.now() / 1000);
+    await mkdir(sessionsRoot, { recursive: true });
+    await Promise.all(
+      [101, 102].map((pid) =>
+        writeFile(
+          join(sessionsRoot, `${pid}.json`),
+          JSON.stringify({ pid, cwd, sessionId, startedAt: startedAt * 1000 }),
+          "utf-8",
+        ),
+      ),
+    );
+    const defaults = getDefaults();
+    const config = {
+      ...defaults,
+      paths: { ...defaults.paths, claudeProjects: [], claudeSessions: [sessionsRoot] },
+    };
+
+    try {
+      const claimed = new Set();
+      const first = await parseClaudeSession(101, cwd, startedAt, config, claimed);
+      assert.equal(first.sessionId, sessionId);
+      claimed.add(sessionId);
+      const second = await parseClaudeSession(102, cwd, startedAt, config, claimed);
+      assert.equal(second.sessionId, undefined, "duplicate legacy PID must stay unbound");
+    } finally {
+      clearAllCaches();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("legacy stale override does not steal a sibling's reserved mtime match", async () => {
+    clearAllCaches();
+    const root = join(tmpdir(), `marm-collision-legacy-reserved-${Date.now()}`);
+    const cwd = join(root, "shared");
+    const projectsRoot = join(root, "projects");
+    const sessionsRoot = join(root, "sessions");
+    const projectDir = join(projectsRoot, encodeClaudeProjectDir(cwd));
+    const dormantPid = 101;
+    const nowSec = Math.floor(Date.now() / 1000);
+    await mkdir(projectDir, { recursive: true });
+    await mkdir(sessionsRoot, { recursive: true });
+    await writeFile(
+      join(projectDir, "active.jsonl"),
+      buildJsonl("active", cwd, new Date((nowSec - 10) * 1000).toISOString()),
+      "utf-8",
+    );
+    await writeFile(
+      join(sessionsRoot, `${dormantPid}.json`),
+      JSON.stringify({
+        pid: dormantPid,
+        cwd,
+        sessionId: "dormant",
+        startedAt: (nowSec - 3600) * 1000,
+      }),
+      "utf-8",
+    );
+    const defaults = getDefaults();
+    const config = {
+      ...defaults,
+      paths: {
+        ...defaults.paths,
+        claudeProjects: [projectsRoot],
+        claudeSessions: [sessionsRoot],
+      },
+    };
+
+    try {
+      const parsed = await parseClaudeSession(
+        dormantPid,
+        cwd,
+        nowSec - 3600,
+        config,
+        new Set(),
+        undefined,
+        new Set(["active"]),
+      );
+      assert.equal(parsed.sessionId, "dormant", "must not override to sibling's reserved session");
     } finally {
       clearAllCaches();
       await rm(root, { recursive: true, force: true });
