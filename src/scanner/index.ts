@@ -27,6 +27,7 @@ import { claudeSessionRegistry, sessionEnrichmentCache } from "./cache.js";
 import {
   detectClaudePhase,
   getClaudeSessionRoots,
+  matchClaudeSessionsByMtime,
   parseClaudeSession,
   parseClaudeTokens,
 } from "./claude.js";
@@ -142,6 +143,61 @@ export async function scanAgents(
     : [];
   perfEnd("codex-index");
 
+  const claudeSessionRoots = getClaudeSessionRoots(config);
+  const claudeLegacySessionIds = new Set<string>();
+  if (isFullEnrichment) {
+    const legacySessionIds = await promiseAllLimited(
+      agentProcesses
+        .filter((item) => item.agentName === "Claude Code")
+        .map(({ proc }) => async () => {
+          const sessionFile = claudeSessionRoots
+            .map((root) => join(root, `${proc.pid}.json`))
+            .find((candidate) => existsSync(candidate));
+          if (!sessionFile) return undefined;
+          try {
+            const data = JSON.parse(await readFile(sessionFile, "utf-8"));
+            return typeof data.sessionId === "string" ? data.sessionId : undefined;
+          } catch {
+            return undefined;
+          }
+        }),
+      4,
+    );
+    for (const sessionId of legacySessionIds) {
+      if (sessionId) claudeLegacySessionIds.add(sessionId);
+    }
+  }
+
+  // Resolve mtime-only Claude sessions as one batch before enrichment. A
+  // per-PID resolver is order-dependent: a process whose first message is
+  // delayed can claim its sibling's fresher JSONL if it happens to lock first.
+  // Legacy PID session files keep their direct path and are not part of this
+  // heuristic batch.
+  const claudeMtimeRequests = isFullEnrichment
+    ? (
+        await promiseAllLimited(
+          agentProcesses
+            .filter(
+              ({ proc, agentName }) =>
+                agentName === "Claude Code" &&
+                !claudeSessionRoots.some((root) => existsSync(join(root, `${proc.pid}.json`))),
+            )
+            .map(({ proc }) => async () => ({
+              pid: proc.pid,
+              cwd: await getProcessCwd(proc.pid),
+              processStartedAt: await getProcessStartTime(proc.pid),
+            })),
+          4,
+        )
+      ).flatMap((request) => (request ? [request] : []))
+    : [];
+  const claudeMtimeMatches = await matchClaudeSessionsByMtime(claudeMtimeRequests, config);
+  const claudeMtimePidSet = new Set(claudeMtimeRequests.map((request) => request.pid));
+  const reservedClaudeSessionIds = new Set([
+    ...claudeLegacySessionIds,
+    ...[...claudeMtimeMatches.values()].map((match) => match.sessionId),
+  ]);
+
   // 4. Build sessions with enrichment (concurrency limited)
   const sessionPromises = agentProcesses.map(({ proc, agentName }) => async () => {
     const usage = usageMap[proc.pid];
@@ -214,6 +270,9 @@ export async function scanAgents(
       // Get cwd and start time early so mtime-based matching can use them
       const processCwd = (await getProcessCwd(proc.pid)) ?? undefined;
       const processStartTime = await getProcessStartTime(proc.pid);
+      const preselectedMtimeMatch = claudeMtimePidSet.has(proc.pid)
+        ? (claudeMtimeMatches.get(proc.pid) ?? null)
+        : undefined;
       // #108: serialize Claude matches and pass the cycle-claim Set in so
       // each PID's match step sees previously bound sessionIds and skips
       // them. parseClaudeSession adds to the Set itself is not enough —
@@ -226,6 +285,8 @@ export async function scanAgents(
           processStartTime,
           config,
           cycleClaimedClaudeSessionIds,
+          preselectedMtimeMatch,
+          reservedClaudeSessionIds,
         );
         if (result.sessionId) cycleClaimedClaudeSessionIds.add(result.sessionId);
         return result;
