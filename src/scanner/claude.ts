@@ -630,7 +630,17 @@ type ClaudeMtimeCandidate = {
   mtimeMs: number;
   sessionId: string;
   cwd?: string;
-  timestamp: string;
+  /** Absent when the first 8 lines carry no usable timestamp. */
+  timestamp?: string;
+};
+
+/** How far one jsonl must lead the runner-up by mtime to win without timestamps. */
+const CLAUDE_MTIME_FALLBACK_LEAD_MS = 5 * 60 * 1000;
+
+type ClaudeMtimeScore = {
+  scored: Array<ClaudeMtimeCandidate & { deltaSec: number }>;
+  /** Candidates modified around or after the process start — the causal pool. */
+  activeCount: number;
 };
 
 async function listClaudeMtimeCandidates(
@@ -648,14 +658,16 @@ async function listClaudeMtimeCandidates(
 
   for (const candidate of candidates) {
     const meta = await readJsonlSessionMeta(candidate.path);
-    if (!meta?.sessionId || !meta.timestamp) continue;
-    const timestampMs = new Date(meta.timestamp).getTime();
-    if (!Number.isFinite(timestampMs)) continue;
+    if (!meta?.sessionId) continue;
+    // A jsonl whose meta window carries no timestamp is still a real session —
+    // dropping it here would hide the only candidate in a cwd and leave a live
+    // PID permanently unbound. Keep it and let the mtime fallback score it.
+    const timestampMs = meta.timestamp ? new Date(meta.timestamp).getTime() : Number.NaN;
     result.push({
       ...candidate,
       sessionId: meta.sessionId,
       cwd: meta.cwd,
-      timestamp: meta.timestamp,
+      timestamp: Number.isFinite(timestampMs) ? meta.timestamp : undefined,
     });
   }
 
@@ -665,27 +677,56 @@ async function listClaudeMtimeCandidates(
 function scoreClaudeMtimeCandidates(
   candidates: ClaudeMtimeCandidate[],
   processStartedAt: number,
-): Array<ClaudeMtimeCandidate & { deltaSec: number }> {
+): ClaudeMtimeScore {
   const startMs = processStartedAt * 1000;
   const active = candidates.filter(
     (candidate) => candidate.mtimeMs >= startMs - CLAUDE_SESSION_MTIME_MATCH_SEC * 1000,
   );
   const pool = active.length > 0 ? active : candidates;
+  const activeCount = active.length;
 
-  return pool
+  const scored = pool
+    .filter((candidate) => candidate.timestamp !== undefined)
     .map((candidate) => ({
       ...candidate,
-      deltaSec: Math.abs(new Date(candidate.timestamp).getTime() / 1000 - processStartedAt),
+      deltaSec: Math.abs(
+        new Date(candidate.timestamp as string).getTime() / 1000 - processStartedAt,
+      ),
     }))
     .sort((a, b) => a.deltaSec - b.deltaSec);
+  if (scored.length > 0) return { scored, activeCount };
+
+  // No candidate carries a first-line timestamp, so proximity scoring is
+  // impossible. Mirror matchClaudeSessionByMtime's fallback: commit only when
+  // one jsonl clearly leads the rest by mtime. deltaSec 0 marks it as the sole
+  // proposal — two PIDs reaching this path for the same jsonl still tie and
+  // therefore still cancel each other out in the contention pass.
+  const byMtime = [...pool].sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const latest = byMtime[0];
+  const runnerUp = byMtime[1];
+  if (!latest) return { scored: [], activeCount };
+  if (runnerUp && latest.mtimeMs - runnerUp.mtimeMs < CLAUDE_MTIME_FALLBACK_LEAD_MS)
+    return { scored: [], activeCount };
+  return { scored: [{ ...latest, deltaSec: 0 }], activeCount };
 }
 
-function isConfidentClaudeMtimeMatch(
-  scored: Array<ClaudeMtimeCandidate & { deltaSec: number }>,
-): boolean {
-  const top = scored[0];
-  if (!top || top.deltaSec > CLAUDE_MATCH_TOP_DELTA_SEC) return false;
-  const second = scored[1];
+/**
+ * Whether a scored candidate list is safe to bind.
+ *
+ * `soleOwner` means this cwd holds exactly one live Claude PID and exactly one
+ * actively-written jsonl. Collapse needs two of something, so neither failure
+ * mode this guard exists for is reachable there — and the absolute proximity
+ * cap would otherwise reject a resumed session whose jsonl predates its lstart
+ * by hours or days, which is the common shape of a long-running session.
+ * Dominance still applies in every other case; it is what actually prevents
+ * two PIDs from landing on one sessionId.
+ */
+function isConfidentClaudeMtimeMatch(score: ClaudeMtimeScore, soleOwner = false): boolean {
+  const top = score.scored[0];
+  if (!top) return false;
+  const second = score.scored[1];
+  if (soleOwner) return !second;
+  if (top.deltaSec > CLAUDE_MATCH_TOP_DELTA_SEC) return false;
   return !second || second.deltaSec - top.deltaSec >= CLAUDE_MATCH_GAP_SEC;
 }
 
@@ -697,7 +738,7 @@ function toClaudeMtimeMatch(
     filePath: candidate.path,
     sessionId: candidate.sessionId,
     cwd: candidate.cwd ?? fallbackCwd,
-    startedAt: new Date(candidate.timestamp).getTime() / 1000,
+    startedAt: candidate.timestamp ? new Date(candidate.timestamp).getTime() / 1000 : undefined,
     lastActivityAt: candidate.mtimeMs / 1000,
   };
 }
@@ -763,9 +804,13 @@ export async function matchClaudeSessionsByMtime(
     for (const request of group) {
       const processStartedAt = request.processStartedAt;
       if (processStartedAt === undefined) continue;
-      const scored = scoreClaudeMtimeCandidates(candidates, processStartedAt);
-      if (isConfidentClaudeMtimeMatch(scored)) {
-        proposals.push({ pid: request.pid, candidate: scored[0], deltaSec: scored[0].deltaSec });
+      const score = scoreClaudeMtimeCandidates(candidates, processStartedAt);
+      // Knowing how many live PIDs share this cwd is what the batch pass buys
+      // us; a per-PID resolver could never tell "sole owner" from "one of two".
+      const soleOwner = group.length === 1 && score.activeCount === 1;
+      if (isConfidentClaudeMtimeMatch(score, soleOwner)) {
+        const top = score.scored[0];
+        proposals.push({ pid: request.pid, candidate: top, deltaSec: top.deltaSec });
       }
     }
 
