@@ -90,7 +90,10 @@ describe("getProcessStartTime pins the locale (#112)", () => {
         assert.equal(Number.isNaN(startedAt), false);
       }
     } finally {
-      if (previous === undefined) delete process.env.LC_ALL;
+      // Reflect.deleteProperty rather than `delete` — biome's noDelete would
+      // otherwise rewrite this to an assignment, and `process.env.LC_ALL =
+      // undefined` stores the string "undefined" instead of unsetting it.
+      if (previous === undefined) Reflect.deleteProperty(process.env, "LC_ALL");
       else process.env.LC_ALL = previous;
     }
   });
