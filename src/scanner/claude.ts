@@ -625,6 +625,18 @@ export interface ClaudeMtimeMatch {
   lastActivityAt: number;
 }
 
+export interface ClaudeMtimeBatchOptions {
+  /**
+   * Live Claude PID count per cwd, counting every process that could own a
+   * jsonl there — including PIDs this batch cannot score (unreadable lstart)
+   * and PIDs already resolved through legacy pid.json. Sole ownership judged
+   * from the batch's own group would miss those and wrongly relax.
+   */
+  liveClaudePidCountByCwd?: ReadonlyMap<string, number>;
+  /** sessionIds already owned via legacy pid.json — never propose them. */
+  reservedSessionIds?: ReadonlySet<string>;
+}
+
 type ClaudeMtimeCandidate = {
   path: string;
   mtimeMs: number;
@@ -781,20 +793,26 @@ async function hydrateClaudeMtimeMatch(
 export async function matchClaudeSessionsByMtime(
   requests: ClaudeMtimeMatchRequest[],
   config?: MarmonitorConfig,
+  options?: ClaudeMtimeBatchOptions,
 ): Promise<Map<number, ClaudeMtimeMatch>> {
   const matches = new Map<number, ClaudeMtimeMatch>();
   const byCwd = new Map<string, ClaudeMtimeMatchRequest[]>();
 
   for (const request of requests) {
-    if (!request.cwd || request.cwd === "unknown" || request.processStartedAt === undefined)
-      continue;
+    if (!request.cwd || request.cwd === "unknown") continue;
+    if (!Number.isFinite(request.processStartedAt)) continue;
     const group = byCwd.get(request.cwd) ?? [];
     group.push(request);
     byCwd.set(request.cwd, group);
   }
 
   for (const [cwd, group] of byCwd) {
-    const candidates = await listClaudeMtimeCandidates(cwd, config);
+    // A jsonl already owned through pid.json is not up for grabs; proposing it
+    // here would let a heuristic match outrank an authoritative one.
+    const candidates = (await listClaudeMtimeCandidates(cwd, config)).filter(
+      (candidate) => !options?.reservedSessionIds?.has(candidate.sessionId),
+    );
+    const liveClaudePidCount = options?.liveClaudePidCountByCwd?.get(cwd) ?? group.length;
     const proposals: Array<{
       pid: number;
       candidate: ClaudeMtimeCandidate;
@@ -807,7 +825,7 @@ export async function matchClaudeSessionsByMtime(
       const score = scoreClaudeMtimeCandidates(candidates, processStartedAt);
       // Knowing how many live PIDs share this cwd is what the batch pass buys
       // us; a per-PID resolver could never tell "sole owner" from "one of two".
-      const soleOwner = group.length === 1 && score.activeCount === 1;
+      const soleOwner = liveClaudePidCount === 1 && score.activeCount === 1;
       if (isConfidentClaudeMtimeMatch(score, soleOwner)) {
         const top = score.scored[0];
         proposals.push({ pid: request.pid, candidate: top, deltaSec: top.deltaSec });

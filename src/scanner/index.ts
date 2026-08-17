@@ -69,13 +69,17 @@ import type { ScanOptions } from "./types.js";
  * in the batch would mark it "resolved to nothing" instead. `ps -o lstart=`
  * failures are cached for PROCESS_START_TTL_MS, so one transient failure would
  * otherwise leave the session unbound for that entire window.
+ *
+ * NaN must be rejected as firmly as undefined: getProcessStartTime derives the
+ * value with `new Date(...).getTime()`, so an unparseable `ps` line yields NaN,
+ * and a NaN deltaSec silently passes every `>` threshold comparison.
  */
 export function isBatchableClaudeMtimeRequest<
   T extends { cwd?: string; processStartedAt?: number },
 >(request: T | null | undefined): request is T {
   if (!request) return false;
   if (!request.cwd || request.cwd === "unknown") return false;
-  return request.processStartedAt !== undefined;
+  return Number.isFinite(request.processStartedAt);
 }
 
 /** Scan for all running AI agent sessions */
@@ -191,26 +195,57 @@ export async function scanAgents(
   // delayed can claim its sibling's fresher JSONL if it happens to lock first.
   // Legacy PID session files keep their direct path and are not part of this
   // heuristic batch.
-  const claudeMtimeRequests = isFullEnrichment
+  const claudeProcessMeta = isFullEnrichment
     ? (
         await promiseAllLimited(
           agentProcesses
-            .filter(
-              ({ proc, agentName }) =>
-                agentName === "Claude Code" &&
-                !claudeSessionRoots.some((root) => existsSync(join(root, `${proc.pid}.json`))),
-            )
+            .filter((item) => item.agentName === "Claude Code")
             .map(({ proc }) => async () => ({
               pid: proc.pid,
               cwd: await getProcessCwd(proc.pid),
               processStartedAt: await getProcessStartTime(proc.pid),
+              hasLegacySessionFile: claudeSessionRoots.some((root) =>
+                existsSync(join(root, `${proc.pid}.json`)),
+              ),
             })),
           4,
         )
-      ).flatMap((request) => (isBatchableClaudeMtimeRequest(request) ? [request] : []))
+      ).flatMap((meta) => (meta ? [meta] : []))
     : [];
-  const claudeMtimeMatches = await matchClaudeSessionsByMtime(claudeMtimeRequests, config);
+
+  // Ownership context covers every live Claude PID in the cwd, not just the
+  // ones this batch can score. A sibling with an unreadable lstart, or one
+  // already resolved through pid.json, still owns one of the jsonls there.
+  const liveClaudePidCountByCwd = new Map<string, number>();
+  for (const meta of claudeProcessMeta) {
+    if (!meta.cwd || meta.cwd === "unknown") continue;
+    liveClaudePidCountByCwd.set(meta.cwd, (liveClaudePidCountByCwd.get(meta.cwd) ?? 0) + 1);
+  }
+
+  const claudeMtimeRequests = claudeProcessMeta
+    .filter((meta) => !meta.hasLegacySessionFile)
+    .flatMap((meta) => (isBatchableClaudeMtimeRequest(meta) ? [meta] : []));
+  const claudeMtimeMatches = await matchClaudeSessionsByMtime(claudeMtimeRequests, config, {
+    liveClaudePidCountByCwd,
+    reservedSessionIds: claudeLegacySessionIds,
+  });
   const claudeMtimePidSet = new Set(claudeMtimeRequests.map((request) => request.pid));
+
+  // The per-PID matcher's no-start-time fallback picks the most recent jsonl,
+  // which is only defensible when nothing else in the cwd could own it. With a
+  // sibling present it would hand one pane's session to the other, so those
+  // PIDs are refused outright instead.
+  const claudeSiblingBlockedPids = new Set(
+    claudeProcessMeta
+      .filter(
+        (meta) =>
+          !meta.hasLegacySessionFile &&
+          !claudeMtimePidSet.has(meta.pid) &&
+          meta.cwd !== undefined &&
+          (liveClaudePidCountByCwd.get(meta.cwd) ?? 0) > 1,
+      )
+      .map((meta) => meta.pid),
+  );
   const reservedClaudeSessionIds = new Set([
     ...claudeLegacySessionIds,
     ...[...claudeMtimeMatches.values()].map((match) => match.sessionId),
@@ -290,7 +325,9 @@ export async function scanAgents(
       const processStartTime = await getProcessStartTime(proc.pid);
       const preselectedMtimeMatch = claudeMtimePidSet.has(proc.pid)
         ? (claudeMtimeMatches.get(proc.pid) ?? null)
-        : undefined;
+        : claudeSiblingBlockedPids.has(proc.pid)
+          ? null
+          : undefined;
       // #108: serialize Claude matches and pass the cycle-claim Set in so
       // each PID's match step sees previously bound sessionIds and skips
       // them. parseClaudeSession adds to the Set itself is not enough —

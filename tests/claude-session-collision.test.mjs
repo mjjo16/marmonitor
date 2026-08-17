@@ -367,15 +367,42 @@ describe("matchClaudeSessionByMtime — same-cwd collision (#108)", () => {
  * The daemon does not control ps-list ordering, so any assertion made here has
  * to hold for every input order — that is the whole point of the batch pass.
  */
-async function runScanCycle(requests, config) {
-  const batch = await matchClaudeSessionsByMtime(requests, config);
+async function runScanCycle(requests, config, legacySessionIds = new Set()) {
+  // Ownership census covers every live Claude PID in the cwd, including the
+  // ones the batch cannot score — sole ownership judged from the batch's own
+  // group would miss an unscorable sibling and wrongly relax.
+  const liveClaudePidCountByCwd = new Map();
+  for (const request of requests) {
+    if (!request.cwd || request.cwd === "unknown") continue;
+    liveClaudePidCountByCwd.set(request.cwd, (liveClaudePidCountByCwd.get(request.cwd) ?? 0) + 1);
+  }
+
   const batched = new Set(requests.filter(isBatchableClaudeMtimeRequest).map((r) => r.pid));
-  const reserved = new Set([...batch.values()].map((match) => match.sessionId));
+  const batch = await matchClaudeSessionsByMtime(
+    requests.filter((r) => batched.has(r.pid)),
+    config,
+    { liveClaudePidCountByCwd, reservedSessionIds: legacySessionIds },
+  );
+  // An unscorable PID may only use the per-PID fallback when nothing else in
+  // the cwd could own the jsonl it would pick.
+  const siblingBlocked = new Set(
+    requests
+      .filter((r) => !batched.has(r.pid) && r.cwd && (liveClaudePidCountByCwd.get(r.cwd) ?? 0) > 1)
+      .map((r) => r.pid),
+  );
+  const reserved = new Set([
+    ...legacySessionIds,
+    ...[...batch.values()].map((match) => match.sessionId),
+  ]);
   const claimed = new Set();
   const bindings = new Map();
 
   for (const request of requests) {
-    const preselected = batched.has(request.pid) ? (batch.get(request.pid) ?? null) : undefined;
+    const preselected = batched.has(request.pid)
+      ? (batch.get(request.pid) ?? null)
+      : siblingBlocked.has(request.pid)
+        ? null
+        : undefined;
     const result = await parseClaudeSession(
       request.pid,
       request.cwd,
@@ -506,6 +533,76 @@ describe("scan cycle orchestration — order independence (#108)", () => {
       false,
     );
     assert.equal(isBatchableClaudeMtimeRequest(undefined), false);
+  });
+
+  it("isBatchableClaudeMtimeRequest rejects a NaN start time", () => {
+    // getProcessStartTime derives the value with `new Date(...).getTime()`, so
+    // an unparseable `ps` line yields NaN. A NaN deltaSec passes every `>`
+    // threshold comparison, which would let a lone candidate be accepted.
+    assert.equal(
+      isBatchableClaudeMtimeRequest({ cwd: "/tmp/x", processStartedAt: Number.NaN }),
+      false,
+    );
+  });
+
+  it("an unscorable PID does not steal a sibling's jsonl in either order", async () => {
+    // Review #69 point 1: the batch only groups scorable PIDs, so a sibling
+    // whose lstart cannot be read used to fall outside the ownership context.
+    // The readable PID was then treated as sole owner and handed the jsonl,
+    // while the unscorable one reached the per-PID no-start-time fallback and
+    // bound the very same file — whoever took the lock first won.
+    clearAllCaches();
+    const root = join(tmpdir(), `marm-unscorable-sibling-${Date.now()}`);
+    const cwd = join(root, "shared");
+    const sid = "51d0aaaa-bbbb-cccc-dddd-51d0aaaabbbb";
+    const projectsRoot = await setupTwoSessions(root, cwd, [
+      // Resume-style: the first entry long predates both processes' lstart.
+      { sessionId: sid, isoTs: "2026-04-01T09:00:00.000Z" },
+    ]);
+    const config = makeConfig(projectsRoot);
+    const readable = { pid: 101, cwd, processStartedAt: Math.floor(Date.now() / 1000) - 3600 };
+    const unscorable = { pid: 102, cwd, processStartedAt: undefined };
+
+    try {
+      clearAllCaches();
+      const readableFirst = await runScanCycle([readable, unscorable], config);
+      clearAllCaches();
+      const unscorableFirst = await runScanCycle([unscorable, readable], config);
+
+      assert.deepEqual(
+        [readableFirst.get(101), readableFirst.get(102)],
+        [unscorableFirst.get(101), unscorableFirst.get(102)],
+        "owner must not flip with ps-list order",
+      );
+      assert.equal(readableFirst.get(101), undefined, "sole-owner relaxation must not apply");
+      assert.equal(readableFirst.get(102), undefined, "unscorable sibling must not claim it");
+    } finally {
+      clearAllCaches();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("the batch never proposes a sessionId already owned via legacy pid.json", async () => {
+    clearAllCaches();
+    const root = join(tmpdir(), `marm-legacy-reserved-batch-${Date.now()}`);
+    const cwd = join(root, "shared");
+    const owned = "6e6c1111-2222-3333-4444-6e6c11112222";
+    const projectsRoot = await setupTwoSessions(root, cwd, [
+      { sessionId: owned, isoTs: "2026-04-01T09:00:00.000Z" },
+    ]);
+    const config = makeConfig(projectsRoot);
+
+    try {
+      const batch = await matchClaudeSessionsByMtime(
+        [{ pid: 101, cwd, processStartedAt: Math.floor(Date.now() / 1000) - 3600 }],
+        config,
+        { reservedSessionIds: new Set([owned]) },
+      );
+      assert.equal(batch.size, 0, "a pid.json-owned session must stay out of the candidate pool");
+    } finally {
+      clearAllCaches();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 
