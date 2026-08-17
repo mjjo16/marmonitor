@@ -16,6 +16,35 @@ import {
 
 export const execFileAsync = promisify(execFile);
 
+/**
+ * Environment for external commands whose output we parse.
+ *
+ * `ps -o lstart=` renders through LC_TIME, so a Korean or German locale emits
+ * "2026년 8월 17일 월요일 16시 27분 49초" / "Mo. 17 Aug. 16:27:49 2026" — neither
+ * of which `new Date()` can parse. Pinning the locale keeps the output in the
+ * one format our parsers were written against.
+ */
+function parseableOutputEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, LC_ALL: "C" };
+}
+
+/**
+ * Parse a `ps -o lstart=` line into epoch seconds.
+ *
+ * Exported for tests: the locale that produced a given line cannot be recreated
+ * on an arbitrary CI runner, so the parser is exercised with captured output
+ * instead of a live `ps` call.
+ */
+export function parsePsLstart(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const parsed = new Date(trimmed).getTime();
+  // A non-C locale (or any unexpected format) yields NaN here. Returning it
+  // would poison every downstream comparison — NaN passes `>` thresholds and
+  // silently disables mtime prefilters — and the value is cached for minutes.
+  return Number.isFinite(parsed) ? parsed / 1000 : undefined;
+}
+
 /** Get process cwd via lsof (fallback for non-Claude agents) */
 export async function getProcessCwd(pid: number): Promise<string | undefined> {
   const cached = processCwdCache.get(pid);
@@ -54,9 +83,9 @@ export async function getProcessStartTime(pid: number): Promise<number | undefin
     const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf-8",
       timeout: 2000,
+      env: parseableOutputEnv(),
     });
-    const trimmed = stdout.trim();
-    const startedAt = trimmed ? new Date(trimmed).getTime() / 1000 : undefined;
+    const startedAt = parsePsLstart(stdout);
     processStartCache.set(pid, {
       checkedAt: Date.now(),
       startedAt,
