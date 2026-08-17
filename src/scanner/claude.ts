@@ -19,6 +19,8 @@ import {
 } from "../output/utils.js";
 import type { AgentSession, SessionPhase, TokenUsage } from "../types.js";
 import {
+  CLAUDE_MATCH_GAP_SEC,
+  CLAUDE_MATCH_TOP_DELTA_SEC,
   CLAUDE_PHASE_RECENT_LINES,
   CLAUDE_SESSION_AMBIGUITY_GAP_SEC,
   CLAUDE_SESSION_MTIME_MATCH_SEC,
@@ -528,6 +530,8 @@ async function chooseStaleSessionOverride(
   currentSessionId: string | undefined,
   processStartedAt: number | undefined,
   config?: MarmonitorConfig,
+  cycleClaimedSessionIds?: Set<string>,
+  reservedSessionIds?: ReadonlySet<string>,
 ): Promise<{ sessionId: string; cwd?: string; timestamp?: string; filePath: string } | undefined> {
   const projectDirName = await findClaudeProjectDir(processCwd, currentSessionId, config);
   if (!projectDirName) return undefined;
@@ -583,6 +587,16 @@ async function chooseStaleSessionOverride(
   if (!recentMeta?.sessionId) return undefined;
   if (recentMeta.sessionId === currentSessionId) return undefined;
 
+  // #108: a session chosen by the stale override is just as capable of
+  // collapsing two PIDs as a direct mtime match. The per-cycle ownership
+  // check must therefore cover this legacy path as well.
+  if (cycleClaimedSessionIds?.has(recentMeta.sessionId)) return undefined;
+
+  // Active PID metadata and batch-selected mtime matches are reserved before
+  // individual parsing begins. A stale legacy record must not steal one of
+  // those sibling sessions merely because it acquired the mutex first.
+  if (reservedSessionIds?.has(recentMeta.sessionId)) return undefined;
+
   // F2: the candidate sessionId is already direct-bound in the registry.
   // Overriding would let two sessionIds share one jsonl — the exact bug
   // in #103. Keeps the one-jsonl-per-sessionId invariant.
@@ -597,22 +611,274 @@ async function chooseStaleSessionOverride(
   };
 }
 
+export interface ClaudeMtimeMatchRequest {
+  pid: number;
+  cwd?: string;
+  processStartedAt?: number;
+}
+
+export interface ClaudeMtimeMatch {
+  filePath: string;
+  sessionId: string;
+  cwd: string;
+  startedAt?: number;
+  lastActivityAt: number;
+}
+
+export interface ClaudeMtimeBatchOptions {
+  /**
+   * Live Claude PID count per cwd, counting every process that could own a
+   * jsonl there — including PIDs this batch cannot score (unreadable lstart)
+   * and PIDs already resolved through legacy pid.json. Sole ownership judged
+   * from the batch's own group would miss those and wrongly relax.
+   */
+  liveClaudePidCountByCwd?: ReadonlyMap<string, number>;
+  /** sessionIds already owned via legacy pid.json — never propose them. */
+  reservedSessionIds?: ReadonlySet<string>;
+}
+
+type ClaudeMtimeCandidate = {
+  path: string;
+  mtimeMs: number;
+  sessionId: string;
+  cwd?: string;
+  /** Absent when the first 8 lines carry no usable timestamp. */
+  timestamp?: string;
+};
+
+/** How far one jsonl must lead the runner-up by mtime to win without timestamps. */
+const CLAUDE_MTIME_FALLBACK_LEAD_MS = 5 * 60 * 1000;
+
+type ClaudeMtimeScore = {
+  scored: Array<ClaudeMtimeCandidate & { deltaSec: number }>;
+  /** Candidates modified around or after the process start — the causal pool. */
+  activeCount: number;
+};
+
+async function listClaudeMtimeCandidates(
+  cwd: string,
+  config?: MarmonitorConfig,
+): Promise<ClaudeMtimeCandidate[]> {
+  const projectDirName = await findClaudeProjectDir(cwd, undefined, config);
+  if (!projectDirName) return [];
+
+  const candidates = await listClaudeSessionCandidates(
+    projectDirName,
+    getClaudeProjectRoots(config),
+  ).catch(() => []);
+  const result: ClaudeMtimeCandidate[] = [];
+
+  for (const candidate of candidates) {
+    const meta = await readJsonlSessionMeta(candidate.path);
+    if (!meta?.sessionId) continue;
+    // A jsonl whose meta window carries no timestamp is still a real session —
+    // dropping it here would hide the only candidate in a cwd and leave a live
+    // PID permanently unbound. Keep it and let the mtime fallback score it.
+    const timestampMs = meta.timestamp ? new Date(meta.timestamp).getTime() : Number.NaN;
+    result.push({
+      ...candidate,
+      sessionId: meta.sessionId,
+      cwd: meta.cwd,
+      timestamp: Number.isFinite(timestampMs) ? meta.timestamp : undefined,
+    });
+  }
+
+  return result;
+}
+
+function scoreClaudeMtimeCandidates(
+  candidates: ClaudeMtimeCandidate[],
+  processStartedAt: number,
+): ClaudeMtimeScore {
+  const startMs = processStartedAt * 1000;
+  const active = candidates.filter(
+    (candidate) => candidate.mtimeMs >= startMs - CLAUDE_SESSION_MTIME_MATCH_SEC * 1000,
+  );
+  const pool = active.length > 0 ? active : candidates;
+  const activeCount = active.length;
+
+  const scored = pool
+    .filter((candidate) => candidate.timestamp !== undefined)
+    .map((candidate) => ({
+      ...candidate,
+      deltaSec: Math.abs(
+        new Date(candidate.timestamp as string).getTime() / 1000 - processStartedAt,
+      ),
+    }))
+    .sort((a, b) => a.deltaSec - b.deltaSec);
+  if (scored.length > 0) return { scored, activeCount };
+
+  // No candidate carries a first-line timestamp, so proximity scoring is
+  // impossible. Mirror matchClaudeSessionByMtime's fallback: commit only when
+  // one jsonl clearly leads the rest by mtime. deltaSec 0 marks it as the sole
+  // proposal — two PIDs reaching this path for the same jsonl still tie and
+  // therefore still cancel each other out in the contention pass.
+  const byMtime = [...pool].sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const latest = byMtime[0];
+  const runnerUp = byMtime[1];
+  if (!latest) return { scored: [], activeCount };
+  if (runnerUp && latest.mtimeMs - runnerUp.mtimeMs < CLAUDE_MTIME_FALLBACK_LEAD_MS)
+    return { scored: [], activeCount };
+  return { scored: [{ ...latest, deltaSec: 0 }], activeCount };
+}
+
+/**
+ * Whether a scored candidate list is safe to bind.
+ *
+ * `soleOwner` means this cwd holds exactly one live Claude PID and exactly one
+ * actively-written jsonl. Collapse needs two of something, so neither failure
+ * mode this guard exists for is reachable there — and the absolute proximity
+ * cap would otherwise reject a resumed session whose jsonl predates its lstart
+ * by hours or days, which is the common shape of a long-running session.
+ * Dominance still applies in every other case; it is what actually prevents
+ * two PIDs from landing on one sessionId.
+ */
+function isConfidentClaudeMtimeMatch(score: ClaudeMtimeScore, soleOwner = false): boolean {
+  const top = score.scored[0];
+  if (!top) return false;
+  const second = score.scored[1];
+  if (soleOwner) return !second;
+  if (top.deltaSec > CLAUDE_MATCH_TOP_DELTA_SEC) return false;
+  return !second || second.deltaSec - top.deltaSec >= CLAUDE_MATCH_GAP_SEC;
+}
+
+function toClaudeMtimeMatch(
+  candidate: ClaudeMtimeCandidate,
+  fallbackCwd: string,
+): ClaudeMtimeMatch {
+  return {
+    filePath: candidate.path,
+    sessionId: candidate.sessionId,
+    cwd: candidate.cwd ?? fallbackCwd,
+    startedAt: candidate.timestamp ? new Date(candidate.timestamp).getTime() / 1000 : undefined,
+    lastActivityAt: candidate.mtimeMs / 1000,
+  };
+}
+
+async function hydrateClaudeMtimeMatch(
+  match: ClaudeMtimeMatch,
+  config?: MarmonitorConfig,
+): Promise<Partial<AgentSession>> {
+  upsertSessionRegistryEntry(claudeSessionRegistry, {
+    filePath: match.filePath,
+    sessionId: match.sessionId,
+    cwd: match.cwd,
+    firstSeenOffset: 0,
+    startedAt: match.startedAt,
+    source: "claude",
+    binding: basename(match.filePath).includes(match.sessionId) ? "direct" : "provisional",
+  });
+
+  const tokenData = await parseClaudeTokens(match.sessionId, match.cwd, match.startedAt, config);
+  return {
+    cwd: match.cwd,
+    sessionId: match.sessionId,
+    startedAt: match.startedAt,
+    lastActivityAt: match.lastActivityAt,
+    sessionMatched: true,
+    tokenUsage: tokenData.tokenUsage,
+    model: tokenData.model,
+  };
+}
+
+/**
+ * Select mtime matches for all same-cwd Claude PIDs in one scan cycle.
+ *
+ * A one-PID-at-a-time resolver is order-dependent: when process A's first
+ * message is delayed, it can claim process B's fresher JSONL before B is
+ * scanned. Resolve competing proposals as a batch instead. If two PIDs are
+ * within the same dominance window for one JSONL, leave it unbound rather
+ * than guessing an owner.
+ */
+export async function matchClaudeSessionsByMtime(
+  requests: ClaudeMtimeMatchRequest[],
+  config?: MarmonitorConfig,
+  options?: ClaudeMtimeBatchOptions,
+): Promise<Map<number, ClaudeMtimeMatch>> {
+  const matches = new Map<number, ClaudeMtimeMatch>();
+  const byCwd = new Map<string, ClaudeMtimeMatchRequest[]>();
+
+  for (const request of requests) {
+    if (!request.cwd || request.cwd === "unknown") continue;
+    if (!Number.isFinite(request.processStartedAt)) continue;
+    const group = byCwd.get(request.cwd) ?? [];
+    group.push(request);
+    byCwd.set(request.cwd, group);
+  }
+
+  for (const [cwd, group] of byCwd) {
+    // A jsonl already owned through pid.json is not up for grabs; proposing it
+    // here would let a heuristic match outrank an authoritative one.
+    const candidates = (await listClaudeMtimeCandidates(cwd, config)).filter(
+      (candidate) => !options?.reservedSessionIds?.has(candidate.sessionId),
+    );
+    const liveClaudePidCount = options?.liveClaudePidCountByCwd?.get(cwd) ?? group.length;
+    const proposals: Array<{
+      pid: number;
+      candidate: ClaudeMtimeCandidate;
+      deltaSec: number;
+    }> = [];
+
+    for (const request of group) {
+      const processStartedAt = request.processStartedAt;
+      if (processStartedAt === undefined) continue;
+      const score = scoreClaudeMtimeCandidates(candidates, processStartedAt);
+      // Knowing how many live PIDs share this cwd is what the batch pass buys
+      // us; a per-PID resolver could never tell "sole owner" from "one of two".
+      const soleOwner = liveClaudePidCount === 1 && score.activeCount === 1;
+      if (isConfidentClaudeMtimeMatch(score, soleOwner)) {
+        const top = score.scored[0];
+        proposals.push({ pid: request.pid, candidate: top, deltaSec: top.deltaSec });
+      }
+    }
+
+    const proposalsBySession = new Map<string, typeof proposals>();
+    for (const proposal of proposals) {
+      const contenders = proposalsBySession.get(proposal.candidate.sessionId) ?? [];
+      contenders.push(proposal);
+      proposalsBySession.set(proposal.candidate.sessionId, contenders);
+    }
+
+    for (const contenders of proposalsBySession.values()) {
+      contenders.sort((a, b) => a.deltaSec - b.deltaSec);
+      const winner = contenders[0];
+      const runnerUp = contenders[1];
+      // The owner must be clearly closer too. A one-second lstart difference
+      // is normal process-start precision noise, not enough evidence to give
+      // either PID a shared JSONL.
+      if (runnerUp && runnerUp.deltaSec - winner.deltaSec < CLAUDE_MATCH_GAP_SEC) continue;
+      matches.set(winner.pid, toClaudeMtimeMatch(winner.candidate, cwd));
+    }
+  }
+
+  return matches;
+}
+
 /**
  * Match a Claude session by scanning JSONL files in the project directory.
  * When processStartedAt is available, matches by JSONL creation timestamp
  * (first-line timestamp) proximity to process start time.
  * Falls back to the most recently modified JSONL when no start time is available.
+ *
+ * Fail-closed dual threshold (local issue #108): a candidate is accepted only
+ * when (a) its proximity to processStartedAt is within CLAUDE_MATCH_TOP_DELTA_SEC
+ * AND (b) it dominates the runner-up by at least CLAUDE_MATCH_GAP_SEC. When
+ * cycleClaimedSessionIds is supplied, any session already bound to another PID
+ * in this scan cycle is excluded from the candidate pool — without this, two
+ * same-cwd Claude PIDs whose lstart falls in the same second tiebreak onto the
+ * same jsonl and the daemon snapshot collapses both PIDs onto one sessionId.
  */
 export async function matchClaudeSessionByMtime(
   cwd: string,
   processStartedAt: number | undefined,
   config?: MarmonitorConfig,
+  cycleClaimedSessionIds?: Set<string>,
 ): Promise<Partial<AgentSession> | undefined> {
   const projectDirName = await findClaudeProjectDir(cwd, undefined, config);
   if (!projectDirName) return undefined;
 
   const projectRoots = getClaudeProjectRoots(config);
-  const candidates: Array<{ path: string; mtimeMs: number }> = [];
+  const candidates: Array<{ path: string; mtimeMs: number; sessionId: string }> = [];
 
   for (const projectsDir of projectRoots) {
     const projectDir = join(projectsDir, projectDirName);
@@ -621,10 +887,14 @@ export async function matchClaudeSessionByMtime(
       const files = await readdir(projectDir);
       for (const file of files) {
         if (!file.endsWith(".jsonl")) continue;
+        // Basename without ".jsonl" is the sessionId on disk; we use it to
+        // skip files already claimed by another PID in this scan cycle.
+        const sessionId = basename(file, ".jsonl");
+        if (cycleClaimedSessionIds?.has(sessionId)) continue;
         try {
           const filePath = join(projectDir, file);
           const fileStat = await stat(filePath);
-          candidates.push({ path: filePath, mtimeMs: fileStat.mtimeMs });
+          candidates.push({ path: filePath, mtimeMs: fileStat.mtimeMs, sessionId });
         } catch {
           // skip
         }
@@ -660,17 +930,25 @@ export async function matchClaudeSessionByMtime(
     }
 
     if (scored.length > 0) {
-      // Pick the JSONL whose creation time is closest to process start
       scored.sort((a, b) => a.deltaSec - b.deltaSec);
-      // Only accept if within reasonable tolerance (5 minutes)
-      if (scored[0].deltaSec <= 300) {
-        bestPath = scored[0].path;
+      const top = scored[0];
+      const second = scored[1];
+      // Require (a) top close enough AND (b) dominant over the runner-up.
+      // Without (b), two near-simultaneous Claude starts in the same cwd
+      // both land on whichever jsonl wins the tiebreak — same-sessionId
+      // collapse in the daemon snapshot. With (a)+(b), ambiguous matches
+      // are deferred to a later scan cycle (snapshot sessionId stays
+      // unset; CLI surfaces "session not ready") instead of misrouting.
+      const dominates = !second || second.deltaSec - top.deltaSec >= CLAUDE_MATCH_GAP_SEC;
+      if (top.deltaSec <= CLAUDE_MATCH_TOP_DELTA_SEC && dominates) {
+        bestPath = top.path;
       }
-    }
-
-    // Fallback: no timestamp-scored match — only commit if one file clearly leads
-    // to avoid mismatching when multiple sessions share the same cwd.
-    if (!bestPath) {
+      // Intentional fail-closed: if scored produced a result that does not
+      // pass the dual threshold, do NOT fall back to mtime — fallback is
+      // reserved for the case where no jsonl carries a timestamp at all.
+    } else {
+      // Fallback: no timestamp-scored match — only commit if one file clearly
+      // leads by mtime to avoid mismatching when multiple sessions share cwd.
       pool.sort((a, b) => b.mtimeMs - a.mtimeMs);
       const latest = pool[0];
       const second = pool[1];
@@ -733,12 +1011,18 @@ export async function matchClaudeSessionByMtime(
   }
 }
 
-/** Parse Claude Code session file for enriched data */
+/** Parse Claude Code session file for enriched data.
+ *  cycleClaimedSessionIds (#108): per-scan-cycle Set of sessionIds already
+ *  bound to another PID. Threaded to matchClaudeSessionByMtime so same-cwd
+ *  multi-PID environments cannot collapse onto a single sessionId. */
 export async function parseClaudeSession(
   pid: number,
   cwd?: string,
   processStartedAt?: number,
   config?: MarmonitorConfig,
+  cycleClaimedSessionIds?: Set<string>,
+  preselectedMtimeMatch?: ClaudeMtimeMatch | null,
+  reservedSessionIds?: ReadonlySet<string>,
 ): Promise<Partial<AgentSession>> {
   // 1st: try legacy sessions/{pid}.json
   const sessionFile = getClaudeSessionRoots(config)
@@ -761,6 +1045,8 @@ export async function parseClaudeSession(
           data.sessionId,
           processStartedAt,
           config,
+          cycleClaimedSessionIds,
+          reservedSessionIds,
         );
         if (override) {
           resolvedSessionId = override.sessionId;
@@ -788,6 +1074,13 @@ export async function parseClaudeSession(
         sessionMatched: true,
       };
 
+      // Legacy PID records can be stale or duplicated. Returning a sessionId
+      // that is already owned in this scan cycle would recreate the collapse
+      // the mtime path prevents.
+      if (resolvedSessionId && cycleClaimedSessionIds?.has(resolvedSessionId)) {
+        return { cwd: resolvedCwd ?? processCwd, startedAt: resolvedStartedAt };
+      }
+
       if (resolvedSessionId && resolvedCwd) {
         const tokenData = await parseClaudeTokens(
           resolvedSessionId,
@@ -806,8 +1099,20 @@ export async function parseClaudeSession(
   }
 
   // 2nd: match by JSONL mtime in project directory
+  if (preselectedMtimeMatch !== undefined) {
+    if (!preselectedMtimeMatch || cycleClaimedSessionIds?.has(preselectedMtimeMatch.sessionId)) {
+      return {};
+    }
+    return hydrateClaudeMtimeMatch(preselectedMtimeMatch, config);
+  }
+
   if (cwd && cwd !== "unknown") {
-    const matched = await matchClaudeSessionByMtime(cwd, processStartedAt, config);
+    const matched = await matchClaudeSessionByMtime(
+      cwd,
+      processStartedAt,
+      config,
+      cycleClaimedSessionIds,
+    );
     if (matched) return matched;
   }
 

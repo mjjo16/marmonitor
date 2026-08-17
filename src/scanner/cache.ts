@@ -15,6 +15,12 @@ export const PROCESS_START_TTL_MS = 300_000;
 export const CODEX_INDEX_TTL_MS = 30_000;
 export const CLAUDE_SESSION_MTIME_MATCH_SEC = 120;
 export const CLAUDE_SESSION_AMBIGUITY_GAP_SEC = 300;
+// Dual-threshold for matchClaudeSessionByMtime: a jsonl must be (a) authored
+// close enough to processStartedAt AND (b) clearly closer than the runner-up.
+// See local issue #108 — without (b), two near-simultaneous Claude starts in
+// the same cwd collapse onto the same sessionId in the daemon snapshot.
+export const CLAUDE_MATCH_TOP_DELTA_SEC = 10;
+export const CLAUDE_MATCH_GAP_SEC = 5;
 export const CLAUDE_PHASE_RECENT_LINES = 50;
 export const CODEX_PHASE_RECENT_LINES = 30;
 export const RECENT_ACTIVITY_ACTIVE_SEC = 180;

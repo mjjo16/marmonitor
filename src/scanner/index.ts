@@ -27,6 +27,7 @@ import { claudeSessionRegistry, sessionEnrichmentCache } from "./cache.js";
 import {
   detectClaudePhase,
   getClaudeSessionRoots,
+  matchClaudeSessionsByMtime,
   parseClaudeSession,
   parseClaudeTokens,
 } from "./claude.js";
@@ -59,6 +60,28 @@ import type { ScanOptions } from "./types.js";
 
 // ─── Main Scanner ──────────────────────────────────────────────────
 
+/**
+ * Whether a Claude PID belongs in the batch mtime resolution pass (#108).
+ *
+ * The batch scores candidates against `processStartedAt` inside a known cwd,
+ * so a PID missing either is unscorable there. Such a PID must fall through to
+ * the per-PID matcher, which still has an mtime-dominance fallback — keeping it
+ * in the batch would mark it "resolved to nothing" instead. `ps -o lstart=`
+ * failures are cached for PROCESS_START_TTL_MS, so one transient failure would
+ * otherwise leave the session unbound for that entire window.
+ *
+ * NaN must be rejected as firmly as undefined: getProcessStartTime derives the
+ * value with `new Date(...).getTime()`, so an unparseable `ps` line yields NaN,
+ * and a NaN deltaSec silently passes every `>` threshold comparison.
+ */
+export function isBatchableClaudeMtimeRequest<
+  T extends { cwd?: string; processStartedAt?: number },
+>(request: T | null | undefined): request is T {
+  if (!request) return false;
+  if (!request.cwd || request.cwd === "unknown") return false;
+  return Number.isFinite(request.processStartedAt);
+}
+
 /** Scan for all running AI agent sessions */
 export async function scanAgents(
   config: MarmonitorConfig,
@@ -69,6 +92,23 @@ export async function scanAgents(
   const codexBindingRegistry = options.codexBindingRegistry;
   const sessionRegistry = options.sessionRegistry;
   const seenPids = new Set<number>();
+
+  // #108: cycle-local guard against same-cwd Claude PID collisions. A
+  // sessionId bound to one PID is excluded from later parseClaudeSession
+  // candidate pools in the same scan cycle, so two PIDs whose lstart
+  // collides in the same second cannot collapse onto the same sessionId.
+  // The mutex serializes the matching step itself — without it, parallel
+  // promises would each race the claim Set before either could update it.
+  const cycleClaimedClaudeSessionIds = new Set<string>();
+  let claudeMatchTail: Promise<void> = Promise.resolve();
+  const withClaudeMatchLock = <T>(fn: () => Promise<T>): Promise<T> => {
+    const prev = claudeMatchTail;
+    let releaseLock: () => void = () => {};
+    claudeMatchTail = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    return prev.then(fn).finally(releaseLock);
+  };
 
   perfStart("scanAgents");
 
@@ -124,6 +164,92 @@ export async function scanAgents(
     ? await indexCodexSessions(config, { activeCwds: activeCodexCwds })
     : [];
   perfEnd("codex-index");
+
+  const claudeSessionRoots = getClaudeSessionRoots(config);
+  const claudeLegacySessionIds = new Set<string>();
+  if (isFullEnrichment) {
+    const legacySessionIds = await promiseAllLimited(
+      agentProcesses
+        .filter((item) => item.agentName === "Claude Code")
+        .map(({ proc }) => async () => {
+          const sessionFile = claudeSessionRoots
+            .map((root) => join(root, `${proc.pid}.json`))
+            .find((candidate) => existsSync(candidate));
+          if (!sessionFile) return undefined;
+          try {
+            const data = JSON.parse(await readFile(sessionFile, "utf-8"));
+            return typeof data.sessionId === "string" ? data.sessionId : undefined;
+          } catch {
+            return undefined;
+          }
+        }),
+      4,
+    );
+    for (const sessionId of legacySessionIds) {
+      if (sessionId) claudeLegacySessionIds.add(sessionId);
+    }
+  }
+
+  // Resolve mtime-only Claude sessions as one batch before enrichment. A
+  // per-PID resolver is order-dependent: a process whose first message is
+  // delayed can claim its sibling's fresher JSONL if it happens to lock first.
+  // Legacy PID session files keep their direct path and are not part of this
+  // heuristic batch.
+  const claudeProcessMeta = isFullEnrichment
+    ? (
+        await promiseAllLimited(
+          agentProcesses
+            .filter((item) => item.agentName === "Claude Code")
+            .map(({ proc }) => async () => ({
+              pid: proc.pid,
+              cwd: await getProcessCwd(proc.pid),
+              processStartedAt: await getProcessStartTime(proc.pid),
+              hasLegacySessionFile: claudeSessionRoots.some((root) =>
+                existsSync(join(root, `${proc.pid}.json`)),
+              ),
+            })),
+          4,
+        )
+      ).flatMap((meta) => (meta ? [meta] : []))
+    : [];
+
+  // Ownership context covers every live Claude PID in the cwd, not just the
+  // ones this batch can score. A sibling with an unreadable lstart, or one
+  // already resolved through pid.json, still owns one of the jsonls there.
+  const liveClaudePidCountByCwd = new Map<string, number>();
+  for (const meta of claudeProcessMeta) {
+    if (!meta.cwd || meta.cwd === "unknown") continue;
+    liveClaudePidCountByCwd.set(meta.cwd, (liveClaudePidCountByCwd.get(meta.cwd) ?? 0) + 1);
+  }
+
+  const claudeMtimeRequests = claudeProcessMeta
+    .filter((meta) => !meta.hasLegacySessionFile)
+    .flatMap((meta) => (isBatchableClaudeMtimeRequest(meta) ? [meta] : []));
+  const claudeMtimeMatches = await matchClaudeSessionsByMtime(claudeMtimeRequests, config, {
+    liveClaudePidCountByCwd,
+    reservedSessionIds: claudeLegacySessionIds,
+  });
+  const claudeMtimePidSet = new Set(claudeMtimeRequests.map((request) => request.pid));
+
+  // The per-PID matcher's no-start-time fallback picks the most recent jsonl,
+  // which is only defensible when nothing else in the cwd could own it. With a
+  // sibling present it would hand one pane's session to the other, so those
+  // PIDs are refused outright instead.
+  const claudeSiblingBlockedPids = new Set(
+    claudeProcessMeta
+      .filter(
+        (meta) =>
+          !meta.hasLegacySessionFile &&
+          !claudeMtimePidSet.has(meta.pid) &&
+          meta.cwd !== undefined &&
+          (liveClaudePidCountByCwd.get(meta.cwd) ?? 0) > 1,
+      )
+      .map((meta) => meta.pid),
+  );
+  const reservedClaudeSessionIds = new Set([
+    ...claudeLegacySessionIds,
+    ...[...claudeMtimeMatches.values()].map((match) => match.sessionId),
+  ]);
 
   // 4. Build sessions with enrichment (concurrency limited)
   const sessionPromises = agentProcesses.map(({ proc, agentName }) => async () => {
@@ -197,7 +323,29 @@ export async function scanAgents(
       // Get cwd and start time early so mtime-based matching can use them
       const processCwd = (await getProcessCwd(proc.pid)) ?? undefined;
       const processStartTime = await getProcessStartTime(proc.pid);
-      const claudeData = await parseClaudeSession(proc.pid, processCwd, processStartTime, config);
+      const preselectedMtimeMatch = claudeMtimePidSet.has(proc.pid)
+        ? (claudeMtimeMatches.get(proc.pid) ?? null)
+        : claudeSiblingBlockedPids.has(proc.pid)
+          ? null
+          : undefined;
+      // #108: serialize Claude matches and pass the cycle-claim Set in so
+      // each PID's match step sees previously bound sessionIds and skips
+      // them. parseClaudeSession adds to the Set itself is not enough —
+      // a race window between read & add would still let two PIDs win the
+      // same sessionId; the mutex closes that window.
+      const claudeData = await withClaudeMatchLock(async () => {
+        const result = await parseClaudeSession(
+          proc.pid,
+          processCwd,
+          processStartTime,
+          config,
+          cycleClaimedClaudeSessionIds,
+          preselectedMtimeMatch,
+          reservedClaudeSessionIds,
+        );
+        if (result.sessionId) cycleClaimedClaudeSessionIds.add(result.sessionId);
+        return result;
+      });
       if (claudeData.cwd) cwd = claudeData.cwd;
       if (cwd === "unknown") cwd = processCwd ?? "unknown";
       sessionId = claudeData.sessionId;
