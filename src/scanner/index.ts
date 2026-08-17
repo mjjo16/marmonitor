@@ -60,6 +60,24 @@ import type { ScanOptions } from "./types.js";
 
 // ─── Main Scanner ──────────────────────────────────────────────────
 
+/**
+ * Whether a Claude PID belongs in the batch mtime resolution pass (#108).
+ *
+ * The batch scores candidates against `processStartedAt` inside a known cwd,
+ * so a PID missing either is unscorable there. Such a PID must fall through to
+ * the per-PID matcher, which still has an mtime-dominance fallback — keeping it
+ * in the batch would mark it "resolved to nothing" instead. `ps -o lstart=`
+ * failures are cached for PROCESS_START_TTL_MS, so one transient failure would
+ * otherwise leave the session unbound for that entire window.
+ */
+export function isBatchableClaudeMtimeRequest<
+  T extends { cwd?: string; processStartedAt?: number },
+>(request: T | null | undefined): request is T {
+  if (!request) return false;
+  if (!request.cwd || request.cwd === "unknown") return false;
+  return request.processStartedAt !== undefined;
+}
+
 /** Scan for all running AI agent sessions */
 export async function scanAgents(
   config: MarmonitorConfig,
@@ -189,7 +207,7 @@ export async function scanAgents(
             })),
           4,
         )
-      ).flatMap((request) => (request ? [request] : []))
+      ).flatMap((request) => (isBatchableClaudeMtimeRequest(request) ? [request] : []))
     : [];
   const claudeMtimeMatches = await matchClaudeSessionsByMtime(claudeMtimeRequests, config);
   const claudeMtimePidSet = new Set(claudeMtimeRequests.map((request) => request.pid));
