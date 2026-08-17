@@ -507,6 +507,48 @@ async function readJsonlSessionMeta(
 }
 
 /**
+ * Claude Code writes `procStart` into ~/.claude/sessions/<pid>.json as a UTC
+ * calendar string ("Mon Aug 17 05:43:19 2026"). Measured against `ps -o
+ * lstart=` on every live session, it names the same instant to the second —
+ * so it identifies which *incarnation* of a PID authored the file.
+ *
+ * `new Date()` would read the string as local time, which is off by the UTC
+ * offset, hence the explicit suffix.
+ */
+export function parseClaudePidJsonProcStart(procStart: unknown): number | undefined {
+  if (typeof procStart !== "string" || !procStart.trim()) return undefined;
+  const parsed = new Date(`${procStart.trim()} UTC`).getTime();
+  return Number.isFinite(parsed) ? parsed / 1000 : undefined;
+}
+
+/** Slack for the one-second rendering precision on both sides of the compare. */
+const CLAUDE_PROC_START_TOLERANCE_SEC = 2;
+
+/**
+ * Whether a pid.json was written by the process currently holding that PID.
+ *
+ * PIDs are recycled, and the legacy lookup trusts `sessions/<pid>.json` on
+ * filename alone — a new process inheriting a dead one's PID would adopt its
+ * sessionId. Comparing `procStart` against the live start time settles that
+ * deterministically instead of inferring it from mtime staleness.
+ *
+ * Returns "unknown" when either side is missing (older Claude Code builds have
+ * no `procStart`, and `ps` can fail), so callers keep their previous behaviour
+ * rather than discarding a record they cannot judge.
+ */
+export function classifyClaudePidJsonOwnership(
+  procStart: unknown,
+  processStartedAt: number | undefined,
+): "owned" | "recycled" | "unknown" {
+  const recorded = parseClaudePidJsonProcStart(procStart);
+  if (recorded === undefined) return "unknown";
+  if (processStartedAt === undefined || !Number.isFinite(processStartedAt)) return "unknown";
+  return Math.abs(recorded - processStartedAt) <= CLAUDE_PROC_START_TOLERANCE_SEC
+    ? "owned"
+    : "recycled";
+}
+
+/**
  * Stale-session override resolver.
  *
  * Picks a non-current jsonl when the current sessionId's metadata is stale
@@ -1033,13 +1075,32 @@ export async function parseClaudeSession(
       const fileStat = await stat(sessionFile);
       const raw = await readFile(sessionFile, "utf-8");
       const data = JSON.parse(raw);
+      const ownership = classifyClaudePidJsonOwnership(data.procStart, processStartedAt);
+      // #107 A: a recycled PID inherits the dead process's file. Nothing in it
+      // describes the process we are looking at, so drop it wholesale rather
+      // than trying to repair it, and let the mtime heuristic decide.
+      if (ownership === "recycled") {
+        return resolveClaudeSessionByMtime(
+          cwd,
+          processStartedAt,
+          config,
+          cycleClaimedSessionIds,
+          preselectedMtimeMatch,
+        );
+      }
+
       const processCwd = cwd ?? data.cwd;
       const sessionStartedAt = data.startedAt ? data.startedAt / 1000 : undefined;
       let resolvedSessionId: string | undefined = data.sessionId;
       let resolvedCwd: string | undefined = data.cwd;
       let resolvedStartedAt = sessionStartedAt;
 
-      if (processCwd && processCwd !== "unknown") {
+      // #107 B: Claude Code keeps this file current — verified live by running
+      // /clear, which rewrote sessionId while leaving procStart untouched. A
+      // maintained record beats the override's "most recent jsonl in the cwd"
+      // guess, which in that same experiment picked the session /clear had just
+      // abandoned (its first entry sits 1s from lstart, the live one 34m away).
+      if (ownership !== "owned" && processCwd && processCwd !== "unknown") {
         const override = await chooseStaleSessionOverride(
           processCwd,
           data.sessionId,
@@ -1063,6 +1124,27 @@ export async function parseClaudeSession(
             source: "claude",
             binding: "provisional",
           });
+        }
+      }
+
+      // #107 C: pid.json's `startedAt` is when the CLI process came up, not
+      // when the current conversation began. /clear starts a new sessionId in
+      // the same process, so after one the two differ by however long the
+      // process had been running (34 minutes in the live experiment). Take the
+      // session's own first entry when the record is authoritative.
+      if (ownership === "owned" && resolvedSessionId && resolvedCwd) {
+        const directPath = await resolveClaudeSessionFile(
+          resolvedSessionId,
+          resolvedCwd,
+          resolvedStartedAt,
+          config,
+        );
+        const directMeta = directPath ? await readJsonlSessionMeta(directPath) : undefined;
+        const sessionBeganAt = directMeta?.timestamp
+          ? new Date(directMeta.timestamp).getTime() / 1000
+          : undefined;
+        if (sessionBeganAt !== undefined && Number.isFinite(sessionBeganAt)) {
+          resolvedStartedAt = sessionBeganAt;
         }
       }
 
@@ -1099,6 +1181,26 @@ export async function parseClaudeSession(
   }
 
   // 2nd: match by JSONL mtime in project directory
+  return resolveClaudeSessionByMtime(
+    cwd,
+    processStartedAt,
+    config,
+    cycleClaimedSessionIds,
+    preselectedMtimeMatch,
+  );
+}
+
+/**
+ * The mtime-heuristic half of parseClaudeSession, reachable both as the normal
+ * fallback and when a pid.json turns out to belong to a recycled PID (#107).
+ */
+async function resolveClaudeSessionByMtime(
+  cwd: string | undefined,
+  processStartedAt: number | undefined,
+  config?: MarmonitorConfig,
+  cycleClaimedSessionIds?: Set<string>,
+  preselectedMtimeMatch?: ClaudeMtimeMatch | null,
+): Promise<Partial<AgentSession>> {
   if (preselectedMtimeMatch !== undefined) {
     if (!preselectedMtimeMatch || cycleClaimedSessionIds?.has(preselectedMtimeMatch.sessionId)) {
       return {};
