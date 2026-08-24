@@ -6,6 +6,7 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { AgentSession } from "../types.js";
+import { CODEX_INFERRED_BUSY_TTL_SEC } from "./cache.js";
 
 export interface SessionRegistryRecord {
   sessionId: string;
@@ -144,6 +145,9 @@ function findLatestJsonlPath(record: SessionRegistryRecord): string | undefined 
   return undefined;
 }
 
+/** Slack allowed before a record counts as drifted from its file. */
+const CLAMP_TOLERANCE_SEC = CODEX_INFERRED_BUSY_TTL_SEC;
+
 /**
  * Repair activity times that exceed what the session files can justify (#113).
  *
@@ -153,6 +157,14 @@ function findLatestJsonlPath(record: SessionRegistryRecord): string | undefined 
  * from an inference that used to be persisted without an expiry, which left
  * long-quiet sessions reporting "recent" indefinitely — for ten days in the
  * case that surfaced this.
+ *
+ * Two things keep this from firing on legitimate drift. Times are compared
+ * against the mtime rounded *up*, because stored stamps are fractional
+ * (`mtimeMs / 1000`) and a floor comparison would clamp nearly every record by
+ * under a second on every load. And a tolerance is allowed on top, because a
+ * Codex time can come from the SQLite `updated_at` that `mergeCodexIndexedSessions`
+ * maxes with the rollout mtime, so it may legitimately lead the file by a little.
+ * The drift this repairs is hours to days, so the tolerance costs nothing.
  *
  * Records whose file is gone are left alone; there is nothing to check against.
  */
@@ -170,8 +182,8 @@ export async function clampRegistryActivityToObserved(
     if (!jsonlPath) continue;
     try {
       const fileStat = await stat(jsonlPath);
-      const observedAt = Math.floor(fileStat.mtimeMs / 1000);
-      if (record.lastActivityAt > observedAt) {
+      const observedAt = Math.ceil(fileStat.mtimeMs / 1000);
+      if (record.lastActivityAt > observedAt + CLAMP_TOLERANCE_SEC) {
         record.lastActivityAt = observedAt;
         repaired++;
       }
