@@ -30,6 +30,17 @@ export interface SessionRegistryUpdate extends Partial<AgentSession> {
   jsonlPath?: string;
 }
 
+/**
+ * The activity time safe to write to disk: the observed one when the caller
+ * tracks it at all, otherwise whatever it reported. Callers that split the two
+ * always set `observedActivityAt`, even when it is undefined, so its presence —
+ * not its value — is what says "this caller separates observation from
+ * inference" (#113).
+ */
+function resolveObservedForPersist(agent: SessionRegistryUpdate): number | undefined {
+  return "observedActivityAt" in agent ? agent.observedActivityAt : agent.lastActivityAt;
+}
+
 export function updateRegistry(
   registry: Map<string, SessionRegistryRecord>,
   agents: SessionRegistryUpdate[],
@@ -67,7 +78,10 @@ export function updateRegistry(
       // #113: persist observed activity only. lastActivityAt may carry a
       // fresh CPU/phase inference, and this Math.max is monotonic with no
       // expiry — one inferred stamp on disk would outlive the session forever.
-      const observedAt = agent.observedActivityAt ?? agent.lastActivityAt;
+      // The fallback keys on the field being absent, not on it being unset: a
+      // session with an inference but no observation reports the field as
+      // undefined, and `??` would have written the inference instead.
+      const observedAt = resolveObservedForPersist(agent);
       if (observedAt) {
         existing.lastActivityAt = Math.max(existing.lastActivityAt ?? 0, observedAt);
       }
@@ -91,7 +105,7 @@ export function updateRegistry(
           output: agent.tokenUsage?.outputTokens ?? 0,
           cache: agent.tokenUsage?.cacheReadTokens ?? 0,
         },
-        lastActivityAt: agent.observedActivityAt ?? agent.lastActivityAt,
+        lastActivityAt: resolveObservedForPersist(agent),
         model: agent.model,
       });
     }
