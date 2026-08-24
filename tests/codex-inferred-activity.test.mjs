@@ -14,17 +14,20 @@
  * that behaviour inside a TTL and drops the inference afterwards.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import { CODEX_INFERRED_BUSY_TTL_SEC } from "../dist/scanner/cache.js";
+import { propagateWorkerStateToParent } from "../dist/scanner/group.js";
 import {
   clampRegistryActivityToObserved,
   updateRegistry,
 } from "../dist/scanner/session-registry.js";
 import {
   isInferredBusyFresh,
+  mergeObservedActivityAt,
   resolveCodexInferredBusyAt,
   resolveEffectiveActivityAt,
 } from "../dist/scanner/status.js";
@@ -261,5 +264,199 @@ describe("daemon activity-collection updates (#113)", () => {
       { ...update, lastActivityAt: NOW, observedActivityAt: OBSERVED, inferredBusyAt: NOW },
     ]);
     assert.equal(registry.get(update.sessionId).lastActivityAt, OBSERVED);
+  });
+});
+
+describe("mergeObservedActivityAt (#113 review F1)", () => {
+  it("takes the newest candidate and ignores gaps", () => {
+    assert.equal(mergeObservedActivityAt(OBSERVED, undefined, OBSERVED + 5), OBSERVED + 5);
+    assert.equal(mergeObservedActivityAt(undefined, OBSERVED), OBSERVED);
+  });
+
+  it("is undefined when nothing was observed", () => {
+    assert.equal(mergeObservedActivityAt(undefined, undefined), undefined);
+    assert.equal(mergeObservedActivityAt(), undefined);
+  });
+});
+
+describe("enrichment cache round trip (#113 review F1)", () => {
+  // The leak this pins: sessionEnrichmentCache stores the *merged*
+  // lastActivityAt (tiering needs it), so a heavy scan that merged the cached
+  // merged value into its observed time promoted a CPU stamp to an observation
+  // one scan later, and the registry then made it permanent. This mirrors the
+  // Codex path's composition; the source guard below pins that scanAgents
+  // actually feeds it the observed field.
+  const scan = (cache, matchedActivityAt, busy, nowSec) => {
+    let lastActivityAt = mergeObservedActivityAt(cache?.observedActivityAt, matchedActivityAt);
+    let inferredBusyAt = (busy ? nowSec : undefined) ?? cache?.inferredBusyAt;
+    if (!isInferredBusyFresh(inferredBusyAt, nowSec)) inferredBusyAt = undefined;
+    const observedActivityAt = lastActivityAt;
+    lastActivityAt = resolveEffectiveActivityAt(observedActivityAt, inferredBusyAt, nowSec);
+    return { lastActivityAt, observedActivityAt, inferredBusyAt };
+  };
+
+  const T0 = NOW;
+  const busyScan = scan(undefined, OBSERVED, true, T0);
+
+  it("reports the burst but records the rollout mtime as observed", () => {
+    assert.equal(busyScan.lastActivityAt, T0);
+    assert.equal(busyScan.observedActivityAt, OBSERVED);
+  });
+
+  it("does not promote the stamp to an observation on the next scan", () => {
+    const quiet = scan(busyScan, OBSERVED, false, T0 + 30);
+    assert.equal(quiet.observedActivityAt, OBSERVED, "an inference must not become an observation");
+    assert.equal(quiet.lastActivityAt, T0, "the burst is still reported inside the TTL");
+  });
+
+  it("returns to the rollout mtime once the carried stamp expires", () => {
+    const later = scan(busyScan, OBSERVED, false, T0 + CODEX_INFERRED_BUSY_TTL_SEC + 1);
+    assert.equal(later.observedActivityAt, OBSERVED);
+    assert.equal(later.lastActivityAt, OBSERVED);
+  });
+
+  it("keeps observed <= reported at every step", () => {
+    for (const s of [busyScan, scan(busyScan, OBSERVED, false, T0 + 30)]) {
+      assert.ok(s.observedActivityAt <= s.lastActivityAt);
+    }
+  });
+});
+
+describe("scanAgents reads the observed field from the cache (#113 review F1)", () => {
+  // A composition test cannot see which field scanAgents passes in, and that
+  // choice is exactly what broke. The merged value is legitimate for tiering
+  // (a busy process should stay hot) and wrong everywhere else, so pin it to
+  // that one call site.
+  it("uses cachedEnrichment.lastActivityAt only for tier classification", () => {
+    const src = readFileSync(new URL("../src/scanner/index.ts", import.meta.url), "utf8");
+    const lines = src.split("\n");
+    const hits = lines.flatMap((line, i) =>
+      line.includes("cachedEnrichment.lastActivityAt") ||
+      line.includes("cachedEnrichment?.lastActivityAt")
+        ? [i]
+        : [],
+    );
+    assert.equal(hits.length, 1, `expected one read, found ${hits.length}`);
+    // Every other path must read observedActivityAt; an undefined value there
+    // means "nothing observed", never "fall back to the merged time".
+    const context = lines.slice(Math.max(0, hits[0] - 4), hits[0] + 1).join("\n");
+    assert.match(context, /classifySessionTier/);
+  });
+});
+
+describe("worker propagation raises both times (#113 review F3)", () => {
+  const parent = {
+    pid: 1,
+    agentName: "Claude Code",
+    status: "Idle",
+    cpuPercent: 0,
+    memoryMb: 100,
+    lastActivityAt: OBSERVED,
+    observedActivityAt: OBSERVED,
+  };
+
+  it("carries the child's observed activity onto the parent", () => {
+    const merged = propagateWorkerStateToParent(parent, {
+      status: "Active",
+      phase: "tool",
+      lastActivityAt: OBSERVED + 600,
+      observedActivityAt: OBSERVED + 600,
+      cpuPercent: 40,
+      memoryMb: 50,
+    });
+    assert.equal(merged.observedActivityAt, OBSERVED + 600);
+    assert.equal(merged.lastActivityAt, OBSERVED + 600);
+  });
+
+  it("does not let a child's inference reach the parent's observed time", () => {
+    // The child reports a burst it has no file evidence for.
+    const merged = propagateWorkerStateToParent(parent, {
+      status: "Active",
+      phase: "tool",
+      lastActivityAt: NOW,
+      observedActivityAt: OBSERVED,
+      cpuPercent: 40,
+      memoryMb: 50,
+    });
+    assert.equal(merged.observedActivityAt, OBSERVED);
+    assert.equal(merged.lastActivityAt, NOW);
+  });
+});
+
+describe("persisting when there is no observation at all (#113 review F2)", () => {
+  const base = {
+    pid: 87824,
+    agentName: "Codex",
+    cwd: "/Users/x/.ai/projects/tossbank",
+    sessionId: "019ffff2-5589-7ad2-b294-3a2024659287",
+    startedAt: OBSERVED - 12000,
+  };
+
+  it("writes nothing when the only time available is an inference", () => {
+    // A matched Codex session whose rollout mtime has not been read yet:
+    // observedActivityAt is reported, but undefined. `?? lastActivityAt` could
+    // not tell that apart from a caller that does not track it, and wrote the
+    // inference to disk — where the monotonic merge made it permanent.
+    const registry = new Map();
+    updateRegistry(registry, [
+      { ...base, lastActivityAt: NOW, observedActivityAt: undefined, inferredBusyAt: NOW },
+    ]);
+    assert.equal(registry.get(base.sessionId)?.lastActivityAt, undefined);
+  });
+
+  it("does not ratchet an inference in when the record already exists", () => {
+    const registry = new Map();
+    updateRegistry(registry, [{ ...base, lastActivityAt: OBSERVED, observedActivityAt: OBSERVED }]);
+    updateRegistry(registry, [
+      { ...base, lastActivityAt: NOW, observedActivityAt: undefined, inferredBusyAt: NOW },
+    ]);
+    assert.equal(registry.get(base.sessionId).lastActivityAt, OBSERVED);
+  });
+});
+
+describe("clampRegistryActivityToObserved tolerance (#113 review F4)", () => {
+  const dir = join(tmpdir(), "marmonitor-clamp-test");
+  const jsonlPath = join(dir, "rollout.jsonl");
+  const mtimeMs = OBSERVED * 1000 + 466; // fractional, as real mtimes are
+
+  const record = (lastActivityAt) => ({
+    sessionId: "s",
+    agent: "Codex",
+    cwd: "/x",
+    history: [{ pid: 1, jsonlPath, startedAt: OBSERVED }],
+    totalTokens: { input: 0, output: 0, cache: 0 },
+    lastActivityAt,
+  });
+
+  before(async () => {
+    await mkdir(dir, { recursive: true });
+    await writeFile(jsonlPath, "{}\n");
+    await utimes(jsonlPath, new Date(mtimeMs), new Date(mtimeMs));
+  });
+
+  after(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("leaves a fractional mtime-derived stamp alone", async () => {
+    // Stored as mtimeMs / 1000. A floor comparison clamped this by <1s on every
+    // single load, and inflated the repaired count with pure noise.
+    const stored = mtimeMs / 1000;
+    const registry = new Map([["s", record(stored)]]);
+    assert.equal(await clampRegistryActivityToObserved(registry), 0);
+    assert.equal(registry.get("s").lastActivityAt, stored);
+  });
+
+  it("allows a Codex time that legitimately leads the rollout file", async () => {
+    // mergeCodexIndexedSessions maxes the SQLite updated_at with the rollout
+    // mtime, so a small lead is observed, not inferred.
+    const registry = new Map([["s", record(OBSERVED + 60)]]);
+    assert.equal(await clampRegistryActivityToObserved(registry), 0);
+  });
+
+  it("still repairs the drift it exists for", async () => {
+    const registry = new Map([["s", record(OBSERVED + 10 * 24 * 3600)]]);
+    assert.equal(await clampRegistryActivityToObserved(registry), 1);
+    assert.ok(registry.get("s").lastActivityAt <= OBSERVED + 1);
   });
 });
