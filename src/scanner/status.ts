@@ -7,29 +7,72 @@ import { detectApprovalPromptPhase } from "../output/utils.js";
 import { captureTmuxPaneOutput, resolveTmuxJumpTarget } from "../tmux/index.js";
 import type { AgentSession, SessionPhase, SessionStatus } from "../types.js";
 import {
+  CODEX_INFERRED_BUSY_TTL_SEC,
   RECENT_ACTIVITY_ACTIVE_SEC,
   STATUS_HYSTERESIS_SEC,
   stdoutHeuristicCache,
 } from "./cache.js";
 
-export function refreshLastActivityAt(
-  lastActivityAt: number | undefined,
+/**
+ * When a Codex process looks busy right now, independent of what its session
+ * files say.
+ *
+ * Codex drops to ~0% CPU the instant a burst ends and its rollout file lags,
+ * so #090 introduced this inference to stop `last activity` from snapping back
+ * to the old mtime mid-turn. It is an inference, not an observation: it must be
+ * kept apart from observed activity and given a lifetime, which is what #113
+ * was about — the stamp used to be merged into `lastActivityAt` and persisted,
+ * so one CPU blip made a long-dead session look recent forever.
+ */
+export function resolveCodexInferredBusyAt(
   cpuPercent: number,
   phase: SessionPhase | undefined,
   activeCpuThreshold: number,
   agentName: string | undefined,
   nowSec = Math.floor(Date.now() / 1000),
 ): number | undefined {
-  if (agentName !== "Codex") return lastActivityAt;
+  if (agentName !== "Codex") return undefined;
   if (
     cpuPercent > activeCpuThreshold ||
     phase === "permission" ||
     phase === "thinking" ||
     phase === "tool"
   ) {
-    return Math.max(lastActivityAt ?? 0, nowSec);
+    return nowSec;
   }
-  return lastActivityAt;
+  return undefined;
+}
+
+/**
+ * Whether a busy inference may still stand in for observed activity.
+ *
+ * A process doing real work keeps re-stamping well inside this window, so a
+ * stamp older than the TTL means it has been quiet since — and the reported
+ * time must fall back to what the session files actually show.
+ */
+export function isInferredBusyFresh(
+  inferredBusyAt: number | undefined,
+  nowSec = Math.floor(Date.now() / 1000),
+  ttlSec = CODEX_INFERRED_BUSY_TTL_SEC,
+): boolean {
+  return inferredBusyAt !== undefined && nowSec - inferredBusyAt <= ttlSec;
+}
+
+/**
+ * Activity time to report: observed activity, or a still-fresh inference when
+ * that is more recent. An expired inference is dropped so the reported time
+ * falls back to what the session files actually show.
+ */
+export function resolveEffectiveActivityAt(
+  observedActivityAt: number | undefined,
+  inferredBusyAt: number | undefined,
+  nowSec = Math.floor(Date.now() / 1000),
+  ttlSec = CODEX_INFERRED_BUSY_TTL_SEC,
+): number | undefined {
+  const usableInference = isInferredBusyFresh(inferredBusyAt, nowSec, ttlSec)
+    ? inferredBusyAt
+    : undefined;
+  return Math.max(observedActivityAt ?? 0, usableInference ?? 0) || undefined;
 }
 
 /** Determine agent activity status */

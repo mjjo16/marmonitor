@@ -4,20 +4,25 @@ import { getDefaults } from "../dist/config/index.js";
 import {
   applyStatusHysteresis,
   determineStatus,
-  refreshLastActivityAt,
+  resolveCodexInferredBusyAt,
+  resolveEffectiveActivityAt,
 } from "../dist/scanner/status.js";
 
 describe("scanner status heuristics", () => {
-  it("refreshes Codex lastActivityAt when live signals exist", () => {
+  it("stamps a Codex busy inference when live signals exist", () => {
     const now = 1775223000;
-    assert.equal(refreshLastActivityAt(1775194317, 2.5, "tool", 0.5, "Codex", now), now);
-    assert.equal(refreshLastActivityAt(1775194317, 0.0, "thinking", 0.5, "Codex", now), now);
+    assert.equal(resolveCodexInferredBusyAt(2.5, "tool", 0.5, "Codex", now), now);
+    assert.equal(resolveCodexInferredBusyAt(0.0, "thinking", 0.5, "Codex", now), now);
   });
 
-  it("does not refresh lastActivityAt for non-Codex sessions", () => {
+  it("stamps nothing when a Codex process looks quiet", () => {
+    assert.equal(resolveCodexInferredBusyAt(0.0, "done", 0.5, "Codex", 1775223000), undefined);
+  });
+
+  it("does not infer busy for non-Codex sessions", () => {
     assert.equal(
-      refreshLastActivityAt(1775194317, 2.5, "tool", 0.5, "Claude Code", 1775223000),
-      1775194317,
+      resolveCodexInferredBusyAt(2.5, "tool", 0.5, "Claude Code", 1775223000),
+      undefined,
     );
   });
 
