@@ -54,6 +54,7 @@ import {
   detectCliStdoutPhase,
   determineStatus,
   isInferredBusyFresh,
+  mergeObservedActivityAt,
   resolveCodexInferredBusyAt,
   resolveEffectiveActivityAt,
 } from "./status.js";
@@ -299,8 +300,9 @@ export async function scanAgents(
           const fileStat = await stat(regEntry.filePath);
           // #113: compared against a file mtime, so it must use the observed
           // time — a merged one would hide a real write behind an inference.
-          const cachedActivity =
-            (cachedEnrichment.observedActivityAt ?? cachedEnrichment.lastActivityAt ?? 0) * 1000;
+          // With no observation, 0 promotes the session, which is the safe way
+          // to be wrong for a check that only decides whether to look harder.
+          const cachedActivity = (cachedEnrichment.observedActivityAt ?? 0) * 1000;
           if (fileStat.mtimeMs > cachedActivity + 1000) {
             coldPromoted = true; // JSONL changed → force enrichment
           }
@@ -328,7 +330,7 @@ export async function scanAgents(
       // updateRegistry() call writes it to disk. The inference is carried
       // separately so its TTL keeps measuring age since the process last
       // looked busy.
-      lastActivityAt = cachedEnrichment.observedActivityAt ?? cachedEnrichment.lastActivityAt;
+      lastActivityAt = cachedEnrichment.observedActivityAt;
       inferredBusyAt = cachedEnrichment.inferredBusyAt;
     } else if (!isFullEnrichment && !cachedEnrichment) {
       // Light mode with no cache: skip expensive enrichment (lsof, JSONL, tmux)
@@ -397,8 +399,10 @@ export async function scanAgents(
         sessionMatched = true;
         sessionId = matched.id;
         startedAt = matched.timestamp;
-        lastActivityAt =
-          Math.max(cachedEnrichment?.lastActivityAt ?? 0, matched.lastActivityAt ?? 0) || undefined;
+        lastActivityAt = mergeObservedActivityAt(
+          cachedEnrichment?.observedActivityAt,
+          matched.lastActivityAt,
+        );
         model = matched.model;
         codexSessionFile = matched.filePath;
         if (matched.totalTokenUsage) {
@@ -436,8 +440,10 @@ export async function scanAgents(
           config.status.activeCpuThreshold,
           agentName,
         ) ?? cachedEnrichment?.inferredBusyAt;
-      lastActivityAt =
-        Math.max(cachedEnrichment?.observedActivityAt ?? 0, lastActivityAt ?? 0) || undefined;
+      lastActivityAt = mergeObservedActivityAt(
+        cachedEnrichment?.observedActivityAt,
+        lastActivityAt,
+      );
     } else if (agentName === "Gemini") {
       cwd = cachedEnrichment?.cwd ?? (await getProcessCwd(proc.pid)) ?? "unknown";
       const geminiData = await parseGeminiSession(cwd);
@@ -458,7 +464,7 @@ export async function scanAgents(
       // The registry only ever stores observed activity (#113), so merging it
       // monotonically is safe — rollout mtimes do not move backwards.
       const persistedLastActivityAt = sessionRegistry.get(sessionId)?.lastActivityAt;
-      lastActivityAt = Math.max(lastActivityAt ?? 0, persistedLastActivityAt ?? 0) || undefined;
+      lastActivityAt = mergeObservedActivityAt(lastActivityAt, persistedLastActivityAt);
     }
 
     // Everything above tracks observed activity; the inference is layered on

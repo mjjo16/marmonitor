@@ -44,6 +44,21 @@ export function resolveCodexInferredBusyAt(
 }
 
 /**
+ * Newest observed activity among the candidates.
+ *
+ * Every argument must be observation-only. Passing the merged `lastActivityAt`
+ * here is precisely how an inference got laundered into an observation: the
+ * merged value is stored in the enrichment cache for tiering, so reading that
+ * field back on the next scan re-promoted a CPU stamp to "observed", and from
+ * there the monotonic registry merge made it permanent.
+ */
+export function mergeObservedActivityAt(
+  ...candidates: Array<number | undefined>
+): number | undefined {
+  return Math.max(0, ...candidates.map((candidate) => candidate ?? 0)) || undefined;
+}
+
+/**
  * Whether a busy inference may still stand in for observed activity.
  *
  * A process doing real work keeps re-stamping well inside this window, so a
