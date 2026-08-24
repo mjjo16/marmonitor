@@ -64,8 +64,12 @@ export function updateRegistry(
         existing.totalTokens.output = agent.tokenUsage.outputTokens ?? 0;
         existing.totalTokens.cache = agent.tokenUsage.cacheReadTokens ?? 0;
       }
-      if (agent.lastActivityAt) {
-        existing.lastActivityAt = Math.max(existing.lastActivityAt ?? 0, agent.lastActivityAt);
+      // #113: persist observed activity only. lastActivityAt may carry a
+      // fresh CPU/phase inference, and this Math.max is monotonic with no
+      // expiry — one inferred stamp on disk would outlive the session forever.
+      const observedAt = agent.observedActivityAt ?? agent.lastActivityAt;
+      if (observedAt) {
+        existing.lastActivityAt = Math.max(existing.lastActivityAt ?? 0, observedAt);
       }
       if (agent.model) existing.model = agent.model;
       if (agent.cwd) existing.cwd = agent.cwd;
@@ -87,7 +91,7 @@ export function updateRegistry(
           output: agent.tokenUsage?.outputTokens ?? 0,
           cache: agent.tokenUsage?.cacheReadTokens ?? 0,
         },
-        lastActivityAt: agent.lastActivityAt,
+        lastActivityAt: agent.observedActivityAt ?? agent.lastActivityAt,
         model: agent.model,
       });
     }
