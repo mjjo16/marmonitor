@@ -202,6 +202,9 @@ export async function runDaemonLoop(
             startedAt: agent.startedAt,
             tokenUsage: agent.tokenUsage,
             lastActivityAt: agent.lastActivityAt,
+            // #113: without this, updateRegistry() falls back to the merged
+            // lastActivityAt and writes the busy inference to disk.
+            observedActivityAt: agent.observedActivityAt,
             model: agent.model,
             jsonlPath: sessionFile,
           });
