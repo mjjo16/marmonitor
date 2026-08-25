@@ -37,7 +37,13 @@ import {
   selectCodexBindingSession,
   upsertCodexBindingRecord,
 } from "./codex-binding-registry.js";
-import { detectCodexPhase, indexCodexSessions, matchCodexSession } from "./codex.js";
+import type { CodexSessionMeta } from "./codex.js";
+import {
+  detectCodexPhase,
+  indexCodexSessions,
+  parseCodexSessionIdFromCmd,
+  selectCodexSessionForProcess,
+} from "./codex.js";
 import { promiseAllLimited } from "./concurrency.js";
 import { parseGeminiSession } from "./gemini.js";
 import { groupByParent } from "./group.js";
@@ -167,6 +173,25 @@ export async function scanAgents(
     ? await indexCodexSessions(config, { activeCwds: activeCodexCwds })
     : [];
   perfEnd("codex-index");
+
+  // #114: resolve every Codex process's self-declared session before the
+  // enrichment loop, so an explicit binding always outranks another process's
+  // heuristic guess regardless of the order the loop happens to run in. This
+  // mirrors what matchClaudeSessionsByMtime does for Claude.
+  const codexArgvSessionIdByPid = new Map<number, string>();
+  for (const { proc, agentName } of agentProcesses) {
+    if (agentName !== "Codex") continue;
+    const declaredId = parseCodexSessionIdFromCmd(proc.cmd);
+    if (declaredId) codexArgvSessionIdByPid.set(proc.pid, declaredId);
+  }
+  const codexArgvReservedSessionIds = new Set(codexArgvSessionIdByPid.values());
+  const cycleClaimedCodexSessionIds = new Set<string>();
+  let codexMatchChain: Promise<unknown> = Promise.resolve();
+  const withCodexMatchLock = <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = codexMatchChain.then(fn, fn);
+    codexMatchChain = next.catch(() => undefined);
+    return next;
+  };
 
   const claudeSessionRoots = getClaudeSessionRoots(config);
   const claudeLegacySessionIds = new Set<string>();
@@ -385,16 +410,32 @@ export async function scanAgents(
         "unknown";
       processStartedAt = await getProcessStartTime(proc.pid);
 
-      const matched =
-        (codexBindingRegistry
-          ? selectCodexBindingSession(
-              codexBindingRegistry,
-              proc.pid,
-              processStartedAt,
-              cwd,
-              codexSessions,
-            )
-          : undefined) ?? matchCodexSession(cwd, processStartedAt, codexSessions);
+      // #114: serialize so each PID sees what earlier ones claimed. Binding to
+      // the wrong session is worse than not binding — a misbound process shows
+      // another session's tokens and jumps to its pane — so every step refuses
+      // rather than falling through to a guess once a claim exists.
+      const matched = await withCodexMatchLock(async () => {
+        const picked = selectCodexSessionForProcess({
+          declaredSessionId: codexArgvSessionIdByPid.get(proc.pid),
+          sessions: codexSessions,
+          claimedSessionIds: cycleClaimedCodexSessionIds,
+          argvReservedSessionIds: codexArgvReservedSessionIds,
+          cwd,
+          processStartedAt,
+          resolveBinding: codexBindingRegistry
+            ? (available) =>
+                selectCodexBindingSession(
+                  codexBindingRegistry,
+                  proc.pid,
+                  processStartedAt,
+                  cwd,
+                  available,
+                )
+            : undefined,
+        });
+        if (picked) cycleClaimedCodexSessionIds.add(picked.id);
+        return picked;
+      });
       if (matched) {
         sessionMatched = true;
         sessionId = matched.id;

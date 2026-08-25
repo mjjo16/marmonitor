@@ -123,6 +123,13 @@ const CODEX_VSCODE_APP_SERVER_RE = /[/\\]codex\s+app-server(?:\s|$)/i;
 /** Codex `app-server` mode is an IDE/Desktop embedded RPC backend, not an interactive CLI session. */
 const CODEX_APP_SERVER_RE = /\bcodex\b[\s\S]*\bapp-server\b/i;
 
+/**
+ * `codex sandbox` runs one command inside the sandbox — the shape the ChatGPT
+ * desktop app spawns. It owns no rollout of its own, so leaving it in the pool
+ * only gave the cwd heuristic another process to misbind (#114).
+ */
+const CODEX_SANDBOX_RE = /[/\\]codex\s+sandbox(?:\s|$)/i;
+
 /** Match a process against agent signatures using process name first, then cmd fallback. */
 export function detectAgentFromProcessSignature(
   proc: { name: string; cmd?: string },
@@ -134,6 +141,7 @@ export function detectAgentFromProcessSignature(
   // Skip `codex app-server` backends spawned by Codex Desktop or the VS Code
   // Codex extension — these are RPC backends, not interactive CLI sessions.
   if (proc.cmd && CODEX_APP_SERVER_RE.test(proc.cmd)) return null;
+  if (proc.cmd && CODEX_SANDBOX_RE.test(proc.cmd)) return null;
 
   const name = proc.name.toLowerCase();
   const command = (proc.cmd ?? "").toLowerCase();
