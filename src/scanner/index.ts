@@ -53,7 +53,10 @@ import {
   applyStatusHysteresis,
   detectCliStdoutPhase,
   determineStatus,
-  refreshLastActivityAt,
+  isInferredBusyFresh,
+  mergeObservedActivityAt,
+  resolveCodexInferredBusyAt,
+  resolveEffectiveActivityAt,
 } from "./status.js";
 
 import type { ScanOptions } from "./types.js";
@@ -270,12 +273,15 @@ export async function scanAgents(
     let phase: SessionPhase;
     let lastResponseAt: number | undefined;
     let lastActivityAt: number | undefined;
+    let inferredBusyAt: number | undefined;
     let codexSessionFile: string | undefined;
     const runtimeSource = detectRuntimeSource(agentName, proc.cmd);
     const cacheKey = `${agentName}:${proc.pid}`;
     const cachedEnrichment = sessionEnrichmentCache.get(cacheKey);
 
     // Determine session tier for differential enrichment
+    // #113: tiering intentionally uses the merged time — a process that looks
+    // busy should stay hot even while its session file lags behind.
     const tier = cachedEnrichment
       ? classifySessionTier(
           cachedEnrichment.lastActivityAt,
@@ -292,7 +298,11 @@ export async function scanAgents(
       if (regEntry?.filePath) {
         try {
           const fileStat = await stat(regEntry.filePath);
-          const cachedActivity = (cachedEnrichment.lastActivityAt ?? 0) * 1000;
+          // #113: compared against a file mtime, so it must use the observed
+          // time — a merged one would hide a real write behind an inference.
+          // With no observation, 0 promotes the session, which is the safe way
+          // to be wrong for a check that only decides whether to look harder.
+          const cachedActivity = (cachedEnrichment.observedActivityAt ?? 0) * 1000;
           if (fileStat.mtimeMs > cachedActivity + 1000) {
             coldPromoted = true; // JSONL changed → force enrichment
           }
@@ -315,7 +325,13 @@ export async function scanAgents(
       sessionMatched = cachedEnrichment.sessionMatched ?? false;
       phase = cachedEnrichment.phase;
       lastResponseAt = cachedEnrichment.lastResponseAt;
-      lastActivityAt = cachedEnrichment.lastActivityAt;
+      // #113: restore the observed component, not the merged one — otherwise
+      // observedActivityAt below inherits the inference and the every-scan
+      // updateRegistry() call writes it to disk. The inference is carried
+      // separately so its TTL keeps measuring age since the process last
+      // looked busy.
+      lastActivityAt = cachedEnrichment.observedActivityAt;
+      inferredBusyAt = cachedEnrichment.inferredBusyAt;
     } else if (!isFullEnrichment && !cachedEnrichment) {
       // Light mode with no cache: skip expensive enrichment (lsof, JSONL, tmux)
       sessionMatched = true;
@@ -383,8 +399,10 @@ export async function scanAgents(
         sessionMatched = true;
         sessionId = matched.id;
         startedAt = matched.timestamp;
-        lastActivityAt =
-          Math.max(cachedEnrichment?.lastActivityAt ?? 0, matched.lastActivityAt ?? 0) || undefined;
+        lastActivityAt = mergeObservedActivityAt(
+          cachedEnrichment?.observedActivityAt,
+          matched.lastActivityAt,
+        );
         model = matched.model;
         codexSessionFile = matched.filePath;
         if (matched.totalTokenUsage) {
@@ -413,15 +431,19 @@ export async function scanAgents(
         });
       }
 
-      lastActivityAt = refreshLastActivityAt(
+      // #113: the CPU/phase inference is kept out of lastActivityAt so it can
+      // never be persisted or ratcheted into permanence.
+      inferredBusyAt =
+        resolveCodexInferredBusyAt(
+          cpuPercent,
+          phase,
+          config.status.activeCpuThreshold,
+          agentName,
+        ) ?? cachedEnrichment?.inferredBusyAt;
+      lastActivityAt = mergeObservedActivityAt(
+        cachedEnrichment?.observedActivityAt,
         lastActivityAt,
-        cpuPercent,
-        phase,
-        config.status.activeCpuThreshold,
-        agentName,
       );
-      lastActivityAt =
-        Math.max(cachedEnrichment?.lastActivityAt ?? 0, lastActivityAt ?? 0) || undefined;
     } else if (agentName === "Gemini") {
       cwd = cachedEnrichment?.cwd ?? (await getProcessCwd(proc.pid)) ?? "unknown";
       const geminiData = await parseGeminiSession(cwd);
@@ -439,9 +461,17 @@ export async function scanAgents(
     }
 
     if (sessionId && sessionRegistry?.has(sessionId)) {
+      // The registry only ever stores observed activity (#113), so merging it
+      // monotonically is safe — rollout mtimes do not move backwards.
       const persistedLastActivityAt = sessionRegistry.get(sessionId)?.lastActivityAt;
-      lastActivityAt = Math.max(lastActivityAt ?? 0, persistedLastActivityAt ?? 0) || undefined;
+      lastActivityAt = mergeObservedActivityAt(lastActivityAt, persistedLastActivityAt);
     }
+
+    // Everything above tracks observed activity; the inference is layered on
+    // only for reporting, and only while it is still fresh.
+    if (!isInferredBusyFresh(inferredBusyAt)) inferredBusyAt = undefined;
+    const observedActivityAt = lastActivityAt;
+    lastActivityAt = resolveEffectiveActivityAt(observedActivityAt, inferredBusyAt);
 
     if (cwd === "unknown" && isFullEnrichment) {
       cwd = cachedEnrichment?.cwd ?? (await getProcessCwd(proc.pid)) ?? "unknown";
@@ -494,6 +524,8 @@ export async function scanAgents(
       phase,
       lastResponseAt,
       lastActivityAt,
+      observedActivityAt,
+      inferredBusyAt,
       runtimeSource,
       branch,
     } as AgentSession;
@@ -511,6 +543,8 @@ export async function scanAgents(
         phase: session.phase,
         lastResponseAt: session.lastResponseAt,
         lastActivityAt: session.lastActivityAt,
+        observedActivityAt: session.observedActivityAt,
+        inferredBusyAt: session.inferredBusyAt,
         runtimeSource: session.runtimeSource,
         branch: session.branch,
       });

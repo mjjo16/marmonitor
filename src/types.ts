@@ -45,7 +45,11 @@ export interface AgentSession {
   sessionMatched?: boolean; // true if matched to a session file
   phase?: SessionPhase; // current activity phase
   lastResponseAt?: number; // epoch seconds — last AI response
-  lastActivityAt?: number; // epoch seconds — last any event
+  lastActivityAt?: number; // epoch seconds — last any event (observed, or a fresh inference)
+  /** Observed-only activity: session file / index timestamps, never an inference (#113). */
+  observedActivityAt?: number;
+  /** Epoch seconds when the process last looked busy by CPU/phase alone (#113). */
+  inferredBusyAt?: number;
   runtimeSource?: RuntimeSource;
   branch?: string; // git branch from .git/HEAD
 }
