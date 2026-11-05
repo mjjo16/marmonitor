@@ -4,7 +4,12 @@ All notable changes to marmonitor are documented here.
 
 ## [Unreleased]
 
+### Added
+- Configurable `display.statuslineLabel` (`auto`, `path`, `tmux`). Auto preserves unique path labels and disambiguates duplicate paths/shortened names with verified tmux coordinates or a PID fallback.
+- `npm run verify:labels` exercises real same-cwd pane mapping and session renames on a separate temporary tmux socket.
+
 ### Fixed
+- Ambiguous same-cwd panes no longer select the first match for jumps/stdout capture. Process-tree and unique terminal ownership take precedence; a cwd fallback is used only when unique.
 - Identify CLI executables and Node entry scripts instead of matching agent names anywhere in process arguments. Distinguish Codex session, server, sandbox and utility modes; exclude desktop app main processes and incidental helper paths.
 - Count running CLIs independently of session file binding, keeping newly detected or unmatched CLIs in statusline totals. Light scans no longer claim an unverified session binding.
 - Describe unbound CLI metadata without recommending that the live process be killed.

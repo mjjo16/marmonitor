@@ -267,6 +267,8 @@ marmonitor activity --json           # JSON 출력
 
 ### 뱃지 스타일
 
+하단바 이름은 `display.statuslineLabel`로 설정합니다. 기본 `auto`는 같은 경로나 축약 이름이 겹칠 때만 `@local:2.3` 같은 tmux 위치를 붙입니다. `path`는 기존 경로 표시, `tmux`는 확인된 tmux 위치를 사용합니다. 위치를 확인하지 못한 중복 세션은 PID로 구분합니다. 좁은 폭에서 위치가 너무 길어도 PID를 표시하며 클릭 대상은 계속 해당 CLI의 PID입니다.
+
 `integration.tmux.badgeStyle`로 tmux 뱃지와 터미널 텍스트 출력의 스타일을 통일할 수 있습니다.
 
 - `basic` — 기본 컬러 필
@@ -297,7 +299,8 @@ marmonitor settings-init --stdout
 {
   "display": {
     "attentionLimit": 10,
-    "statuslineAttentionLimit": 5
+    "statuslineAttentionLimit": 5,
+    "statuslineLabel": "auto"
   },
   "status": {
     "stalledAfterMin": 20,

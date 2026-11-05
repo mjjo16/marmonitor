@@ -271,6 +271,59 @@ describe("postinstall/preuninstall scripts", () => {
 });
 
 describe("jump attention chooser", () => {
+  it("keeps label-mode caches separate without requiring session metadata or tmux", async () => {
+    const root = await mkdtemp(join(tmpdir(), "marmonitor-label-cli-"));
+    const runtime = join(root, "runtime");
+    const daemonDir = join(runtime, "marmonitor");
+    const configPath = join(root, "settings.json");
+    await mkdir(daemonDir, { recursive: true });
+    const env = {
+      HOME: root,
+      TMPDIR: runtime,
+      TMP: runtime,
+      TEMP: runtime,
+      TMUX: "",
+      TMUX_TMPDIR: runtime,
+      XDG_CONFIG_HOME: root,
+    };
+    try {
+      await writeFile(
+        join(daemonDir, "daemon-snapshot.json"),
+        JSON.stringify(
+          [900001, 900002].map((pid) => ({
+            pid,
+            agentName: "Claude Code",
+            cwd: "/projects/local/ai",
+            status: "Idle",
+            cpuPercent: 0,
+            memoryMb: 20,
+          })),
+        ),
+      );
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          display: { statuslineLabel: "path" },
+          performance: { statuslineTtlMs: 60000 },
+        }),
+      );
+      const args = ["--statusline", "--statusline-format", "tmux-badges", "--config", configPath];
+      const paths = runCli(args, env);
+      assert.doesNotMatch(paths, /local\/ai pid:/);
+      await writeFile(
+        configPath,
+        JSON.stringify({
+          display: { statuslineLabel: "auto" },
+          performance: { statuslineTtlMs: 60000 },
+        }),
+      );
+      const auto = runCli(args, env);
+      assert.match(auto, /local\/ai pid:900001/);
+      assert.match(auto, /local\/ai pid:900002/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it("renders first page with 1-10 numbering", () => {
     const now = Math.floor(Date.now() / 1000);
     const agents = Array.from({ length: 12 }, (_, index) => ({
