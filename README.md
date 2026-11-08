@@ -254,7 +254,7 @@ Activity is collected automatically by the daemon and stored in `~/.config/marmo
 | `[Idle]` | Process alive, no recent activity |
 | `[Stalled]` | No activity for extended period |
 | `[Dead]` | Session file exists but process is gone |
-| `[Unmatched]` | AI process found but no matching session |
+| `[Unmatched]` | Running CLI whose session metadata is not yet bound (included in session counts) |
 
 ## tmux Plugin
 

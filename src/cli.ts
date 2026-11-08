@@ -133,7 +133,7 @@ function buildHelpAppendix(): string {
     "  watch         Live full-screen monitor",
     "  dock          Persistent tmux-friendly monitor",
     "  --statusline  Status bar output for tmux",
-    "  clean         Review or kill unmatched leftovers",
+    "  clean         Review or kill unmatched CLIs by PID",
     "  debug-phase   Inspect raw phase signals for one PID",
     "  guard         Claude hook evaluator; fail-open on malformed input/errors",
     "  settings-*    Locate, inspect, or initialize settings.json",
@@ -166,7 +166,7 @@ function buildHelpAppendix(): string {
     "  [Idle]      Process alive, no recent activity",
     "  [Stalled]   No activity for extended period",
     "  [Dead]      Session file exists but process gone",
-    "  [Unmatched] AI process without matching session",
+    "  [Unmatched] Running CLI whose session metadata is not yet bound",
     "",
     "Common settings:",
     "  display.attentionLimit / display.statuslineAttentionLimit",
@@ -1423,19 +1423,26 @@ function truncateForDisplay(value: string, maxLength: number): string {
 
 program
   .command("clean")
-  .description("Show or terminate unmatched processes")
+  .description("Show unmatched CLIs or terminate selected PIDs")
   .option("--config <path>", "Path to settings.json")
   .option("--json", "Output as JSON")
-  .option("--kill", "Send SIGTERM to selected unmatched processes")
+  .option("--kill", "Send SIGTERM to the unmatched PID(s) given with --pid")
   .option("--pid <pid...>", "Only include specific unmatched PID(s)")
   .action(async (opts) => {
-    const config = await loadConfig(resolveConfigPath(opts));
-    const agents = await scanAgents(config, { sessionRegistry: await loadSessionRegistry() });
     const selectedPids = Array.isArray(opts.pid)
       ? opts.pid
           .map((value: string) => Number.parseInt(value, 10))
           .filter((value: number) => !Number.isNaN(value))
       : undefined;
+    // Unmatched CLIs are live sessions awaiting metadata, so never kill them
+    // in bulk. Require the caller to name each PID explicitly.
+    if (opts.kill && (!selectedPids || selectedPids.length === 0)) {
+      console.error("--kill requires --pid <pid...>; review candidates with `marmonitor clean`.");
+      process.exitCode = 1;
+      return;
+    }
+    const config = await loadConfig(resolveConfigPath(opts));
+    const agents = await scanAgents(config, { sessionRegistry: await loadSessionRegistry() });
     const targets = selectUnmatchedTargets(agents, selectedPids);
 
     if (opts.kill) {

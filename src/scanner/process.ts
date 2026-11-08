@@ -112,46 +112,197 @@ export function detectRuntimeSource(agentName: string, cmd?: string): RuntimeSou
 }
 
 export function matchesProcessCommand(command: string, processName: string): boolean {
-  const escaped = processName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(?:^|[/\\\\])${escaped}(?:\\s|$)`, "i").test(command);
+  return commandExecutable(command, processName) !== undefined;
 }
 
-/** Electron sub-process flags that indicate a desktop GUI helper, not a CLI agent. */
-const ELECTRON_TYPE_RE = /--type=(utility|renderer|gpu-process|zygote|broker)/;
-const CODEX_VSCODE_APP_SERVER_RE = /[/\\]codex\s+app-server(?:\s|$)/i;
+/** Match only the command's executable, never a path or prompt in its arguments.
+ * Native process names come from ps comm, so unquoted spaces in parent paths
+ * are safe here. Interpreted entry points are handled separately below. */
+function commandExecutable(
+  command: string,
+  name: string,
+): { executable: string; args: string[] } | undefined {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = command
+    .trim()
+    .match(
+      new RegExp(
+        `^(?:"((?:.*?[/\\\\])?${escaped})"|'((?:.*?[/\\\\])?${escaped})'|((?:.*?[/\\\\])?${escaped}))(?=\\s|$)`,
+        "i",
+      ),
+    );
+  if (!match) return undefined;
+  const executable = match[1] ?? match[2] ?? match[3];
+  // Do not extend an unquoted executable into subsequent command arguments.
+  if (!match[1] && !match[2] && /\s[-/]|\s[^\s]*=/.test(executable)) return undefined;
+  return {
+    executable,
+    args: commandWords(command.trim().slice(match[0].length)),
+  };
+}
 
-/** Codex `app-server` mode is an IDE/Desktop embedded RPC backend, not an interactive CLI session. */
-const CODEX_APP_SERVER_RE = /\bcodex\b[\s\S]*\bapp-server\b/i;
+// ps args is a display string, not lossless argv. Respect quotes when present;
+// never search later words for an entry point if the first one is ambiguous.
+function commandWords(command: string): string[] {
+  return Array.from(
+    command.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^']*)'|([^\s]+)/g),
+    (match) => match[1] ?? match[2] ?? match[3],
+  );
+}
 
-/**
- * `codex sandbox` runs one command inside the sandbox — the shape the ChatGPT
- * desktop app spawns. It owns no rollout of its own, so leaving it in the pool
- * only gave the cwd heuristic another process to misbind (#114).
- */
-const CODEX_SANDBOX_RE = /[/\\]codex\s+sandbox(?:\s|$)/i;
+const NODE_VALUE_OPTIONS = new Set([
+  "-r",
+  "--require",
+  "--import",
+  "--loader",
+  "--experimental-loader",
+  "--conditions",
+  "-C",
+]);
+const CODEX_VALUE_OPTIONS = new Set([
+  "-c",
+  "--config",
+  "-m",
+  "--model",
+  "-p",
+  "--profile",
+  "-C",
+  "--cd",
+  "-s",
+  "--sandbox",
+  "-a",
+  "--ask-for-approval",
+  "--approval-mode",
+  "--enable",
+  "--disable",
+  "--add-dir",
+  "--local-provider",
+  "--remote",
+  "--remote-auth-token-env",
+  "-i",
+  "--image",
+]);
+
+/** Only the first positional CLI argument is a subcommand. Option values,
+ * prompt text and arguments after `--` cannot turn a CLI into a server. */
+function codexMode(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--") return undefined;
+    if (["-h", "--help", "-V", "--version"].includes(arg)) return "help";
+    if (CODEX_VALUE_OPTIONS.has(arg)) {
+      i++;
+    } else if (!arg.startsWith("-")) {
+      return arg;
+    }
+  }
+  return undefined;
+}
+
+type CodexProcessRole = "session" | "server" | "sandbox" | "utility";
+
+// A Codex binary is also a launcher for non-agent runtimes and management
+// commands. Only session-bearing invocations belong in the CLI inventory.
+// Keep mode interpretation separate from executable identity and file binding.
+const CODEX_NON_SESSION_MODES: Record<string, Exclude<CodexProcessRole, "session">> = {
+  "app-server": "server",
+  "exec-server": "server",
+  "mcp-server": "server",
+  sandbox: "sandbox",
+  agents: "utility",
+  login: "utility",
+  logout: "utility",
+  mcp: "utility",
+  plugin: "utility",
+  "remote-control": "utility",
+  app: "utility",
+  completion: "utility",
+  update: "utility",
+  doctor: "utility",
+  debug: "utility",
+  apply: "utility",
+  a: "utility",
+  queue: "utility",
+  archive: "utility",
+  delete: "utility",
+  "migrate-rollouts": "utility",
+  "migrate-nfs-db": "utility",
+  unarchive: "utility",
+  cloud: "utility",
+  features: "utility",
+  help: "utility",
+};
+
+function codexProcessRole(args: string[]): CodexProcessRole {
+  const mode = codexMode(args);
+  return mode && Object.hasOwn(CODEX_NON_SESSION_MODES, mode)
+    ? CODEX_NON_SESSION_MODES[mode]
+    : "session";
+}
+
+const NODE_ENTRY_POINTS: Record<string, RegExp> = {
+  "Claude Code": /[/\\]@anthropic-ai[/\\]claude-code[/\\]cli\.js$/i,
+  Codex: /[/\\]@openai[/\\]codex[/\\]bin[/\\]codex\.js$/i,
+  Gemini: /[/\\]@google[/\\]gemini-cli[/\\](?:dist[/\\])?(?:src[/\\])?index\.js$/i,
+};
+
+function nodeEntryPoint(command: string): { executable: string; args: string[] } | undefined {
+  const node = commandExecutable(command, "node") ?? commandExecutable(command, "nodejs");
+  if (!node) return undefined;
+  for (let i = 0; i < node.args.length; i++) {
+    const arg = node.args[i];
+    // Eval/print input is code, not an agent entry script.
+    if (["-e", "--eval", "-p", "--print"].includes(arg) || /^(--eval|--print)=/.test(arg))
+      return undefined;
+    if (NODE_VALUE_OPTIONS.has(arg)) {
+      i++;
+    } else if (arg === "--") {
+      return { executable: node.args[i + 1] ?? "", args: node.args.slice(i + 2) };
+    } else if (!arg.startsWith("-")) {
+      return { executable: arg, args: node.args.slice(i + 1) };
+    }
+  }
+  return undefined;
+}
 
 /** Match a process against agent signatures using process name first, then cmd fallback. */
 export function detectAgentFromProcessSignature(
   proc: { name: string; cmd?: string },
   config: MarmonitorConfig,
 ): string | null {
-  // Skip Electron sub-processes (renderer, utility, gpu, zygote) to avoid
-  // false-positive detection of desktop apps (e.g. Claude Desktop) as CLI agents.
-  if (proc.cmd && ELECTRON_TYPE_RE.test(proc.cmd)) return null;
-  // Skip `codex app-server` backends spawned by Codex Desktop or the VS Code
-  // Codex extension — these are RPC backends, not interactive CLI sessions.
-  if (proc.cmd && CODEX_APP_SERVER_RE.test(proc.cmd)) return null;
-  if (proc.cmd && CODEX_SANDBOX_RE.test(proc.cmd)) return null;
-
   const name = proc.name.toLowerCase();
-  const command = (proc.cmd ?? "").toLowerCase();
-  if (command.includes(".vscode/extensions") && CODEX_VSCODE_APP_SERVER_RE.test(proc.cmd ?? "")) {
-    return null;
-  }
+  const command = proc.cmd ?? "";
+  const script = name === "node" || name === "nodejs" ? nodeEntryPoint(command) : undefined;
   for (const [agentName, agentConfig] of Object.entries(config.agents)) {
     for (const pname of agentConfig.processNames) {
-      if (name === pname) return agentName;
-      if (command && matchesProcessCommand(command, pname)) return agentName;
+      const native = name === pname.toLowerCase();
+      const entry =
+        native || ((name === "node" || name === "nodejs") && !script)
+          ? commandExecutable(command, pname)
+          : script &&
+              (script.executable.split(/[/\\]/).pop()?.toLowerCase() === pname.toLowerCase() ||
+                NODE_ENTRY_POINTS[agentName]?.test(script.executable))
+            ? script
+            : undefined;
+      // An unavailable command retains the native-name fallback. A present
+      // but contradictory command is not evidence of an agent CLI.
+      if (!entry && !(native && !command)) continue;
+      if (
+        entry &&
+        /[/\\](?:claude|codex)\.app[/\\]contents[/\\]macos[/\\](?:claude|codex)$/i.test(
+          entry.executable,
+        )
+      )
+        return null;
+      if (
+        entry?.args.some((arg) => /^--type=(utility|renderer|gpu-process|zygote|broker)$/.test(arg))
+      )
+        return null;
+      // Linux Electron may advertise /proc/self/exe instead of its app path.
+      if (agentName === "Codex" && entry) {
+        if (codexProcessRole(entry.args) !== "session") return null;
+      }
+      return agentName;
     }
   }
   return null;

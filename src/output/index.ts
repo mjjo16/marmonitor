@@ -1,5 +1,6 @@
 import chalk from "chalk";
 import * as si from "systeminformation";
+import { partitionSessions } from "../sessions.js";
 import type { TmuxJumpResult } from "../tmux/index.js";
 import type {
   AgentSession,
@@ -211,18 +212,17 @@ export async function printStatus(agents: AgentSession[]): Promise<void> {
   printSystemLine(sys);
   console.log();
 
-  const alive = agents.filter((a) => a.status !== "Dead" && a.status !== "Unmatched");
-  const unmatched = agents.filter((a) => a.status === "Unmatched");
-  const dead = agents.filter((a) => a.status === "Dead");
+  const { running, matched: alive, unmatched, dead } = partitionSessions(agents);
 
   if (alive.length === 0 && unmatched.length === 0 && dead.length === 0) {
     console.log("No AI agent sessions detected.");
     return;
   }
 
+  if (running.length > 0) {
+    console.log(`AI Sessions (${running.length} running, ${unmatched.length} unmatched):\n`);
+  }
   if (alive.length > 0) {
-    console.log(`AI Sessions (${alive.length} active):\n`);
-
     // Column widths — fixed-width columns first, variable-width last
     const W = {
       status: 10,
@@ -325,13 +325,13 @@ export async function printStatus(agents: AgentSession[]): Promise<void> {
   if (unmatched.length > 0) {
     console.log(
       chalk.magenta(
-        `\nUnmatched Processes (${unmatched.length}) — no matching session, consider killing:`,
+        `\nUnmatched CLI Sessions (${unmatched.length}) — session metadata not yet bound:`,
       ),
     );
     for (const a of unmatched) {
       const agent = agentLabel(a.agentName);
       console.log(
-        `  ${chalk.magenta("[Unmatched]")}  ${agent}  PID:${a.pid}  MEM:${a.memoryMb.toFixed(0)}MB${runtimeLabel(a.runtimeSource)}  ${chalk.dim(`kill ${a.pid}`)}`,
+        `  ${chalk.magenta("[Unmatched]")}  ${agent}  PID:${a.pid}  MEM:${a.memoryMb.toFixed(0)}MB${runtimeLabel(a.runtimeSource)}  ${chalk.dim(shortenPath(a.cwd))}`,
       );
     }
   }
@@ -358,14 +358,14 @@ export async function printStatusJson(agents: AgentSession[]): Promise<void> {
 
 export function printCleanPlan(agents: AgentSession[], kill: boolean): void {
   if (agents.length === 0) {
-    console.log("No unmatched processes to clean.");
+    console.log("No unmatched CLIs.");
     return;
   }
 
   console.log(
     kill
-      ? `Cleaning ${agents.length} unmatched process(es) with SIGTERM:`
-      : `Cleanup candidates (${agents.length}) — rerun with --kill to terminate:`,
+      ? `Sending SIGTERM to ${agents.length} unmatched CLI(s):`
+      : `Unmatched CLIs (${agents.length}) — these may be live sessions; terminate one with --kill --pid <pid>:`,
   );
 
   for (const agent of agents) {
@@ -613,19 +613,18 @@ export function printJumpJson(result: TmuxJumpResult): void {
  */
 export async function printDock(agents: AgentSession[], maxLines = 12): Promise<void> {
   const sys = await getSystemInfo();
-  const alive = agents.filter((a) => a.status !== "Dead" && a.status !== "Unmatched");
-  const unmatched = agents.filter((a) => a.status === "Unmatched");
+  const { running, matched: alive, unmatched } = partitionSessions(agents);
   const waitingCount = alive.filter((a) => a.phase === "permission").length;
   const stalledCount = alive.filter((a) => a.status === "Stalled").length;
 
   const alerts: string[] = [];
   if (waitingCount > 0) alerts.push(chalk.red(`!${waitingCount} waiting`));
   if (stalledCount > 0) alerts.push(chalk.yellow(`${stalledCount} stalled`));
-  if (unmatched.length > 0) alerts.push(chalk.magenta(`${unmatched.length} orphan`));
+  if (unmatched.length > 0) alerts.push(chalk.magenta(`${unmatched.length} unmatched`));
   const alertStr = alerts.length > 0 ? `  ${alerts.join(" ")}` : "";
 
   console.log(
-    `${chalk.bold("AI")} ${alive.length}/${agents.length}  CPU:${sys.cpuPercent.toFixed(0)}% MEM:${sys.memoryUsedGb}G${alertStr}`,
+    `${chalk.bold("AI")} ${running.length} running  CPU:${sys.cpuPercent.toFixed(0)}% MEM:${sys.memoryUsedGb}G${alertStr}`,
   );
   console.log(chalk.dim("─".repeat(36)));
 
@@ -661,7 +660,7 @@ export async function printDock(agents: AgentSession[], maxLines = 12): Promise<
   }
 
   if (unmatched.length > 0) {
-    console.log(chalk.magenta(`! ${unmatched.length} unmatched (marmonitor clean)`));
+    console.log(chalk.magenta(`! ${unmatched.length} CLI sessions awaiting metadata`));
   }
 }
 
@@ -683,10 +682,9 @@ export async function renderStatusline(
   hasJumpAnchor = false,
   activeAgentPid?: number,
 ): Promise<string> {
-  const alive = agents.filter((a) => a.status !== "Dead" && a.status !== "Unmatched");
-  const unmatched = agents.filter((a) => a.status === "Unmatched");
+  const { running, matched: alive, unmatched } = partitionSessions(agents);
 
-  if (alive.length === 0) {
+  if (running.length === 0) {
     return format === "wezterm-pills" ? renderUnavailableStatusline(format) : "AI:0";
   }
 
@@ -697,11 +695,11 @@ export async function renderStatusline(
   const highCpuCount = alive.filter((a) => a.cpuPercent >= 10).length;
   const thinkingCount = alive.filter((a) => a.phase === "thinking").length;
   const toolCount = alive.filter((a) => a.phase === "tool").length;
-  const claudeCount = alive.filter((a) => a.agentName === "Claude Code").length;
-  const codexCount = alive.filter((a) => a.agentName === "Codex").length;
-  const geminiCount = alive.filter((a) => a.agentName === "Gemini").length;
+  const claudeCount = running.filter((a) => a.agentName === "Claude Code").length;
+  const codexCount = running.filter((a) => a.agentName === "Codex").length;
+  const geminiCount = running.filter((a) => a.agentName === "Gemini").length;
   const snapshot = {
-    aliveCount: alive.length,
+    aliveCount: running.length,
     waitingCount,
     riskCount: 0,
     stalledCount,
