@@ -118,6 +118,48 @@ describe("selectCodexSessionForProcess (#114)", () => {
   });
 });
 
+describe("stale persisted Codex bindings", () => {
+  // Observed on 2026-11-08: PID 58195 started 11-07 16:38:09 and created its
+  // rollout six seconds later, but the registry still held a heuristic guess
+  // whose file was last written on 11-02, before the process existed.
+  const START = Date.parse("2026-11-07T07:38:09Z") / 1000;
+  const old = {
+    ...session("01a16303-a223-7a21-b6f5-441aef0ca267", Date.parse("2026-10-22T09:49:04Z") / 1000),
+    lastActivityAt: Date.parse("2026-11-02T13:42:29Z") / 1000,
+  };
+  const born = {
+    ...session("01a1b4f1-90e0-7491-8b4a-c9c4225d2699", START + 6),
+    lastActivityAt: Date.now() / 1000,
+  };
+  const pickWith = (sessions, bound, overrides = {}) =>
+    pick({ sessions, processStartedAt: START, resolveBinding: () => bound, ...overrides });
+
+  it("replaces a binding the process never wrote with the rollout it created", () => {
+    assert.equal(pickWith([old, born], old)?.id, born.id);
+  });
+
+  it("keeps a binding the process has written since it started", () => {
+    // PID 17851 resumed an older thread inside the TUI and kept writing it,
+    // abandoning the rollout it created at startup.
+    const resumed = { ...old, lastActivityAt: START + 86400 };
+    assert.equal(pickWith([resumed, born], resumed)?.id, old.id);
+  });
+
+  it("keeps an untouched binding when no rollout was born with the process", () => {
+    assert.equal(pickWith([old], old)?.id, old.id);
+  });
+
+  it("keeps the binding when two rollouts were born together", () => {
+    const twin = { ...session("01a1b4f2-0000-7000-8000-000000000000", START + 9) };
+    assert.equal(pickWith([old, born, twin], old)?.id, old.id);
+  });
+
+  it("ignores a rollout born in another cwd", () => {
+    const elsewhere = { ...born, cwd: "/elsewhere" };
+    assert.equal(pickWith([old, elsewhere], old)?.id, old.id);
+  });
+});
+
 describe("ChatGPT app sandbox helpers are not sessions (#114)", () => {
   const config = getDefaults();
 
