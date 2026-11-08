@@ -139,7 +139,7 @@ marmonitor watch / dock                # live 갱신
 marmonitor --statusline --statusline-format <compact|standard|extended|tmux-badges>
 marmonitor jump-back                   # 직전 pane 복귀
 marmonitor debug-phase --pid <pid>     # phase/세션/stdout/tmux/Codex binding 종합 진단
-marmonitor clean [--kill] [--pid ...]  # Unmatched 프로세스 SIGTERM
+marmonitor clean [--kill --pid ...]   # Unmatched CLI 조회, 지정 PID만 SIGTERM
 marmonitor guard                       # stdin Claude hook 평가 (fail-open)
 marmonitor alerts [on|off|notify on|off]
 marmonitor settings-{path,show,init [--advanced]}

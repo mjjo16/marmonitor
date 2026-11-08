@@ -333,8 +333,9 @@ export async function scanAgents(
       lastActivityAt = cachedEnrichment.observedActivityAt;
       inferredBusyAt = cachedEnrichment.inferredBusyAt;
     } else if (!isFullEnrichment && !cachedEnrichment) {
-      // Light mode with no cache: skip expensive enrichment (lsof, JSONL, tmux)
-      sessionMatched = true;
+      // Existence was established by process detection, not by a file binding.
+      // Keep new CLIs unbound until a heavy scan can actually resolve metadata.
+      sessionMatched = false;
     } else if (agentName === "Claude Code") {
       // Get cwd and start time early so mtime-based matching can use them
       const processCwd = (await getProcessCwd(proc.pid)) ?? undefined;

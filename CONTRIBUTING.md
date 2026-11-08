@@ -7,9 +7,19 @@ Thanks for your interest in contributing! This guide covers everything you need 
 ```bash
 git clone https://github.com/mjjo16/marmonitor.git
 cd marmonitor
-npm install
+npm ci --ignore-scripts
 npm run build
 ```
+
+Use `--ignore-scripts` for a development checkout: the package's lifecycle
+scripts control the installed daemon. Lifecycle tests use a temporary HOME
+and runtime directory so they cannot stop the developer's daemon or edit
+their tmux configuration.
+
+Run `npm run verify:local` to compare full/light scans against real local
+processes without replacing the installed daemon. Reports and statusline
+previews are saved in a fresh temporary directory. This checks the current
+scan interval; it does not monitor daemon continuity outside that interval.
 
 ### Prerequisites
 

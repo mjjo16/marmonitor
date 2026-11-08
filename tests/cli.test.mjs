@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -51,6 +51,16 @@ describe("config CLI helpers", () => {
   it("includes debug-phase in help output", () => {
     const output = runCli(["--help"]);
     assert.match(output, /debug-phase \[options\]/);
+  });
+
+  it("refuses clean --kill without explicit PIDs", () => {
+    const result = spawnSync(process.execPath, [cliPath, "clean", "--kill"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--kill requires --pid/);
+    assert.equal(result.stdout, "");
   });
 
   it("includes update-integration in help output", () => {
@@ -199,30 +209,74 @@ describe("config CLI helpers", () => {
 });
 
 describe("postinstall/preuninstall scripts", () => {
-  it("postinstall outputs install guide to stderr", () => {
-    const output = execFileSync("node", [join(repoRoot, "bin", "postinstall.cjs")], {
-      encoding: "utf8",
-      stdio: ["pipe", "pipe", "pipe"],
+  // Both scripts intentionally control daemons and edit user configuration.
+  // Never let these tests inherit the developer's HOME or runtime directory.
+  async function withLifecycleEnv(fn) {
+    const root = await mkdtemp(join(tmpdir(), "marmonitor-lifecycle-test-"));
+    const home = join(root, "home");
+    const runtime = join(root, "tmp");
+    await mkdir(home);
+    await mkdir(runtime);
+    const env = {
+      ...process.env,
+      HOME: home,
+      TMPDIR: runtime,
+      TMP: runtime,
+      TEMP: runtime,
+      XDG_CONFIG_HOME: join(root, "config"),
+    };
+    try {
+      // Verify Node resolves the same isolated paths that the lifecycle
+      // scripts will use before allowing any lifecycle script to execute.
+      const resolved = JSON.parse(
+        execFileSync(
+          process.execPath,
+          [
+            "-e",
+            'console.log(JSON.stringify([require("node:os").homedir(),require("node:os").tmpdir()]))',
+          ],
+          { env, encoding: "utf8" },
+        ),
+      );
+      assert.deepEqual(resolved, [home, runtime]);
+      await fn({ env, home, runtime });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+
+  it("postinstall outputs install guide to stderr in an isolated environment", async () => {
+    await withLifecycleEnv(async ({ env, home, runtime }) => {
+      const conf = "# test configuration\n";
+      await writeFile(join(home, ".tmux.conf"), conf);
+      const result = spawnSync(process.execPath, [join(repoRoot, "bin", "postinstall.cjs")], {
+        env,
+        encoding: "utf8",
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stderr, /marmonitor.*installed/);
+      assert.match(result.stderr, /marmonitor setup tmux/);
+      assert.match(result.stderr, /marmonitor update-integration/);
+      assert.match(result.stderr, /marmonitor status/);
+      assert.match(result.stderr, /uninstall-integration/);
+      assert.doesNotMatch(result.stderr, /daemon restarted/);
+      assert.equal(await readFile(join(home, ".tmux.conf"), "utf8"), conf);
+      await assert.rejects(readFile(join(runtime, "marmonitor", "daemon.pid")), { code: "ENOENT" });
     });
-    // stderr is captured via shell redirect
-    const merged = execFileSync(
-      "sh",
-      ["-c", `node "${join(repoRoot, "bin", "postinstall.cjs")}" 2>&1`],
-      { encoding: "utf8" },
-    );
-    assert.match(merged, /marmonitor.*installed/);
-    assert.match(merged, /marmonitor setup tmux/);
-    assert.match(merged, /marmonitor update-integration/);
-    assert.match(merged, /marmonitor status/);
-    assert.match(merged, /uninstall-integration/);
   });
 
-  it("preuninstall runs without error", () => {
-    const output = execFileSync("node", [join(repoRoot, "bin", "preuninstall.cjs")], {
-      encoding: "utf8",
+  it("preuninstall removes only the isolated fixture's plugin line", async () => {
+    await withLifecycleEnv(async ({ env, home }) => {
+      const confPath = join(home, ".tmux.conf");
+      await writeFile(confPath, "# preserve this\nset -g @plugin 'mjjo16/marmonitor-tmux'\n");
+      const output = execFileSync(process.execPath, [join(repoRoot, "bin", "preuninstall.cjs")], {
+        env,
+        encoding: "utf8",
+      });
+      assert.match(output, /removed tmux plugin line/);
+      assert.doesNotMatch(output, /daemon stopped/);
+      assert.equal(await readFile(confPath, "utf8"), "# preserve this\n");
     });
-    // Should not throw. Output may be empty if no tmux.conf plugin line.
-    assert.equal(typeof output, "string");
   });
 });
 
