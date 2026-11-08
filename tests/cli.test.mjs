@@ -53,6 +53,16 @@ describe("config CLI helpers", () => {
     assert.match(output, /debug-phase \[options\]/);
   });
 
+  it("refuses clean --kill without explicit PIDs", () => {
+    const result = spawnSync(process.execPath, [cliPath, "clean", "--kill"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--kill requires --pid/);
+    assert.equal(result.stdout, "");
+  });
+
   it("includes update-integration in help output", () => {
     const output = runCli(["--help"]);
     assert.match(output, /update-integration/);

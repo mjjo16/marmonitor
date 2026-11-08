@@ -358,14 +358,14 @@ export async function printStatusJson(agents: AgentSession[]): Promise<void> {
 
 export function printCleanPlan(agents: AgentSession[], kill: boolean): void {
   if (agents.length === 0) {
-    console.log("No unmatched processes to clean.");
+    console.log("No unmatched CLIs.");
     return;
   }
 
   console.log(
     kill
-      ? `Cleaning ${agents.length} unmatched process(es) with SIGTERM:`
-      : `Cleanup candidates (${agents.length}) — rerun with --kill to terminate:`,
+      ? `Sending SIGTERM to ${agents.length} unmatched CLI(s):`
+      : `Unmatched CLIs (${agents.length}) — these may be live sessions; terminate one with --kill --pid <pid>:`,
   );
 
   for (const agent of agents) {

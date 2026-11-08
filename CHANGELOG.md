@@ -8,6 +8,7 @@ All notable changes to marmonitor are documented here.
 - Identify CLI executables and Node entry scripts instead of matching agent names anywhere in process arguments. Distinguish Codex session, server, sandbox and utility modes; exclude desktop app main processes and incidental helper paths.
 - Count running CLIs independently of session file binding, keeping newly detected or unmatched CLIs in statusline totals. Light scans no longer claim an unverified session binding.
 - Describe unbound CLI metadata without recommending that the live process be killed.
+- `clean --kill` now requires explicit `--pid` targets, since unmatched entries are live CLIs awaiting metadata rather than leftover helpers.
 - Isolate install/uninstall lifecycle tests from the developer's HOME and runtime directory so the suite cannot stop their daemon or remove their tmux plugin configuration.
 
 ## [0.2.6] - 2026-05-25
