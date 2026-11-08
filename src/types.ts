@@ -18,6 +18,8 @@ export type SessionPhase = "thinking" | "tool" | "permission" | "done" | undefin
 /** Runtime source / host environment */
 export type RuntimeSource = "cli" | "vscode" | "unknown";
 
+export type StatuslineLabelMode = "path" | "tmux" | "auto";
+
 /** Child/worker process info */
 export interface WorkerProcess {
   pid: number;

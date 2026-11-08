@@ -336,6 +336,7 @@ function buildMinimalConfigSample(): string {
       display: {
         attentionLimit: 10,
         statuslineAttentionLimit: 5,
+        statuslineLabel: "auto",
       },
       integration: {
         tmux: {
@@ -373,6 +374,7 @@ function buildAdvancedConfigSample(): string {
       display: {
         attentionLimit: 10,
         statuslineAttentionLimit: 5,
+        statuslineLabel: "auto",
       },
       integration: {
         tmux: {
@@ -506,9 +508,18 @@ function resolveAttentionLimit(
   return Math.min(Math.max(Math.floor(fallback), 1), 10);
 }
 
-function statuslineCacheFile(format: string, attentionLimit: number, width?: number): string {
+function statuslineCacheFile(
+  format: string,
+  attentionLimit: number,
+  width?: number,
+  labelMode = "auto",
+): string {
   const widthKey = width && width > 0 ? String(width) : "auto";
-  return join(tmpdir(), "marmonitor", `statusline-${format}-${attentionLimit}-${widthKey}.txt`);
+  return join(
+    tmpdir(),
+    "marmonitor",
+    `statusline-${format}-${attentionLimit}-${widthKey}-${labelMode}.txt`,
+  );
 }
 
 /** Read cached statusline. When activePanePid is provided, the cache is
@@ -519,8 +530,9 @@ async function readCachedStatusline(
   attentionLimit: number,
   width: number | undefined,
   ttlMs: number,
+  labelMode = "auto",
 ): Promise<{ content: string; panePid: number | undefined } | undefined> {
-  const path = statuslineCacheFile(format, attentionLimit, width);
+  const path = statuslineCacheFile(format, attentionLimit, width, labelMode);
   try {
     const fileStat = await stat(path);
     if (Date.now() - fileStat.mtimeMs > ttlMs) return undefined;
@@ -544,8 +556,9 @@ async function writeCachedStatusline(
   width: number | undefined,
   value: string,
   activePanePid?: number,
+  labelMode = "auto",
 ): Promise<void> {
-  const path = statuslineCacheFile(format, attentionLimit, width);
+  const path = statuslineCacheFile(format, attentionLimit, width, labelMode);
   const data = activePanePid ? `${activePanePid}\n${value}` : value;
   try {
     await mkdir(join(tmpdir(), "marmonitor"), { recursive: true });
@@ -614,6 +627,7 @@ program
           attentionLimit,
           width,
           config.performance.statuslineTtlMs,
+          config.display.statuslineLabel,
         );
         if (cached) {
           if (isTmuxBadges && cached.panePid !== undefined) {
@@ -662,6 +676,7 @@ program
           config.integration.tmux.badgeStyle,
           hasJumpAnchor,
           activeAgentPid,
+          config.display.statuslineLabel,
         );
         await writeCachedStatusline(
           opts.statuslineFormat,
@@ -669,6 +684,7 @@ program
           width,
           rendered,
           activePanePid,
+          config.display.statuslineLabel,
         );
         console.log(rendered);
         return;

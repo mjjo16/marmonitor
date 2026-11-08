@@ -71,4 +71,38 @@ describe("selectTmuxPaneForAgent", () => {
     assert.equal(result?.pane.target, "mjjo:2.1");
     assert.equal(result?.match, "cwd");
   });
+
+  it("never selects the first of several same-cwd panes", () => {
+    const duplicates = [...panes, { ...panes[1], target: "mjjo:2.2", panePid: 600, paneIndex: 2 }];
+    assert.equal(
+      selectTmuxPaneForAgent({ pid: 999, cwd: "/repo/b" }, duplicates, new Map()),
+      undefined,
+    );
+  });
+  it("uses verified tty before cwd fallback", () => {
+    const ttys = new Map([
+      [999, "/dev/ttys002"],
+      [100, "/dev/ttys002"],
+      [500, "/dev/ttys003"],
+    ]);
+    const result = selectTmuxPaneForAgent({ pid: 999, cwd: "/repo/b" }, panes, new Map(), ttys);
+    assert.equal(result?.pane.target, "mjjo:1.2");
+    assert.equal(result?.match, "tty");
+  });
+  it("does not treat a shared /dev/null stdin as a shared terminal", () => {
+    const ttys = new Map([
+      [999, "/dev/null"],
+      [100, "/dev/null"],
+    ]);
+    assert.equal(
+      selectTmuxPaneForAgent({ pid: 999, cwd: "/other" }, panes, new Map(), ttys),
+      undefined,
+    );
+  });
+  it("can require verified process ownership for display labels", () => {
+    assert.equal(
+      selectTmuxPaneForAgent({ pid: 999, cwd: "/repo/b" }, panes, new Map(), new Map(), false),
+      undefined,
+    );
+  });
 });

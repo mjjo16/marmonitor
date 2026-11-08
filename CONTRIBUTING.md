@@ -21,6 +21,11 @@ processes without replacing the installed daemon. Reports and statusline
 previews are saved in a fresh temporary directory. This checks the current
 scan interval; it does not monitor daemon continuity outside that interval.
 
+Run `npm run verify:labels` to exercise duplicate-path labels using two harmless
+processes on a separate temporary tmux socket. It checks PID ownership, session
+renames, pane moves and pane selection, then stops only that fixture server. The installed daemon PID
+and the user's tmux configuration are compared before and after verification.
+
 ### Prerequisites
 
 - Node.js >= 18
