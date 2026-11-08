@@ -11,6 +11,7 @@ export function propagateWorkerStateToParent(
     | "status"
     | "phase"
     | "lastActivityAt"
+    | "observedActivityAt"
     | "lastResponseAt"
     | "startedAt"
     | "cpuPercent"
@@ -42,6 +43,18 @@ export function propagateWorkerStateToParent(
       child.lastResponseAt ?? 0,
       child.startedAt ?? 0,
     ),
+    // #113: raise the observed component alongside the merged one. Only
+    // observed times are persisted now, so leaving this behind would drop a
+    // worker's genuinely observed activity from the parent's registry record
+    // and break the `lastActivityAt = max(observed, fresh inference)`
+    // invariant. The child's own observed field is used, never its merged one.
+    observedActivityAt:
+      Math.max(
+        parent.observedActivityAt ?? 0,
+        child.observedActivityAt ?? 0,
+        child.lastResponseAt ?? 0,
+        child.startedAt ?? 0,
+      ) || undefined,
     lastResponseAt: Math.max(parent.lastResponseAt ?? 0, child.lastResponseAt ?? 0) || undefined,
   };
 }
