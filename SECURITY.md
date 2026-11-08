@@ -31,6 +31,7 @@ The `clean --kill` command can terminate processes via `SIGTERM`. This feature:
 - Only targets processes identified as unmatched AI agents
 - Verifies process identity before termination
 - Requires explicit `--kill` flag (not triggered by default)
+- Requires explicit `--pid` targets; unmatched entries can be live CLIs, so bulk termination is refused
 
 ### Guard / Hook Evaluation (`guard`)
 
