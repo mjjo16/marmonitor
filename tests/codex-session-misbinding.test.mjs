@@ -130,7 +130,7 @@ describe("ChatGPT app sandbox helpers are not sessions (#114)", () => {
 
   it("still detects a real codex CLI", () => {
     assert.equal(
-      detectAgentFromProcessSignature({ name: "codex", cmd: RESUME_CMD }, config),
+      detectAgentFromProcessSignature({ name: "node", cmd: RESUME_CMD }, config),
       "Codex",
     );
   });
@@ -138,7 +138,7 @@ describe("ChatGPT app sandbox helpers are not sessions (#114)", () => {
   it("does not exclude a process merely mentioning sandbox settings", () => {
     assert.equal(
       detectAgentFromProcessSignature(
-        { name: "codex", cmd: "node /opt/homebrew/bin/codex -c sandbox_mode=danger-full-access" },
+        { name: "node", cmd: "node /opt/homebrew/bin/codex -c sandbox_mode=danger-full-access" },
         config,
       ),
       "Codex",
