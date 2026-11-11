@@ -5,13 +5,25 @@
 //
 //   node scripts/soak-check.mjs [--out <dir>]   run once, append to <dir>/soak.jsonl
 //   node scripts/soak-check.mjs --summary [--out <dir>]   aggregate a soak period
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { appendFile, mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
+
+// launchd does not set TMPDIR, so os.tmpdir() falls back to /tmp while the
+// daemon writes under the per-user Darwin temp dir. Resolve it once so this
+// script and the marmonitor CLI it spawns read the daemon's runtime files.
+if (!process.env.TMPDIR && process.platform === "darwin") {
+  try {
+    const dir = execFileSync("getconf", ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8" }).trim();
+    if (dir) process.env.TMPDIR = dir;
+  } catch {
+    // keep the os.tmpdir() fallback
+  }
+}
 const args = process.argv.slice(2);
 const outDir = args.includes("--out")
   ? args[args.indexOf("--out") + 1]
