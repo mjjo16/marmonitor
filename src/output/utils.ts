@@ -1,4 +1,5 @@
-import type { AgentSession, SessionPhase } from "../types.js";
+import type { TmuxJumpTarget } from "../tmux/index.js";
+import type { AgentSession, SessionPhase, StatuslineLabelMode } from "../types.js";
 import {
   renderAttention,
   renderAttentionActive,
@@ -819,12 +820,77 @@ export function buildTmuxBadgeBar(
   return [agentPills.join(" "), alertPills.join(" "), jumpBack, focus].filter(Boolean).join("  ");
 }
 
+export interface StatuslineLabelOptions {
+  mode?: StatuslineLabelMode;
+  tmuxTargets?: ReadonlyMap<number, TmuxJumpTarget>;
+  collisionItems?: ReadonlyArray<Pick<AgentSession, "pid" | "cwd">>;
+}
+
+/** Build identities before truncating attention items so hidden siblings do
+ * not make a visible label alternate between ambiguous and unambiguous. */
+function statuslineLabels(
+  items: AttentionItem[],
+  maxLength: number,
+  options: StatuslineLabelOptions,
+): Map<number, string> {
+  const candidates = [
+    ...new Map(
+      [...(options.collisionItems ?? []), ...items].map((item) => [item.pid, item]),
+    ).values(),
+  ];
+  const mode = options.mode ?? "auto";
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: sanitize untrusted display names
+  const clean = (value: string): string => value.replace(/[\x00-\x1f\x7f]/g, "?");
+  const paths = new Map(
+    candidates.map((item) => [item.pid, clean(compactStatuslineDirLabel(item.cwd, maxLength))]),
+  );
+  const counts = new Map<string, number>();
+  for (const path of paths.values()) counts.set(path, (counts.get(path) ?? 0) + 1);
+  const fit = (item: Pick<AgentSession, "pid" | "cwd">, identity: string): string => {
+    const suffix = identity.length <= maxLength ? identity : `pid:${item.pid}`;
+    const budget = maxLength - suffix.length - 1;
+    return budget > 0
+      ? `${truncateMiddle(clean(compactStatuslineDirLabel(item.cwd, budget)), budget)} ${suffix}`
+      : suffix;
+  };
+  const labels = new Map<number, string>();
+  for (const item of candidates) {
+    const path = paths.get(item.pid) ?? "";
+    const collision = (counts.get(path) ?? 0) > 1;
+    const target = options.tmuxTargets?.get(item.pid);
+    const location =
+      target && target.match !== "cwd"
+        ? clean(`@${target.pane.sessionName}:${target.pane.windowIndex}.${target.pane.paneIndex}`)
+        : undefined;
+    if (mode === "path" || (mode === "auto" && !collision)) {
+      labels.set(item.pid, path);
+    } else if (mode === "tmux" && location) {
+      labels.set(item.pid, location.length <= maxLength ? location : `pid:${item.pid}`);
+    } else if (collision) {
+      labels.set(item.pid, fit(item, location ?? `pid:${item.pid}`));
+    } else {
+      labels.set(item.pid, path);
+    }
+  }
+  // Two real CLIs can share a pane, and sanitized names can also collide.
+  const labelCounts = new Map<string, number>();
+  for (const label of labels.values()) labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+  for (const item of candidates) {
+    let label = labels.get(item.pid) ?? "";
+    if (mode !== "path" && (labelCounts.get(label) ?? 0) > 1) label = fit(item, `pid:${item.pid}`);
+    // tmux interprets # syntax and terminal controls in subprocess output.
+    labels.set(item.pid, label.replace(/#/g, "##"));
+  }
+  return labels;
+}
+
 export function buildTmuxAttentionPills(
   items: AttentionItem[],
   maxCount = 5,
   width?: number,
   badgeStyle: BadgeStyle = "basic",
   activeAgentPid?: number,
+  labelOptions: StatuslineLabelOptions = {},
 ): string | undefined {
   if (maxCount <= 0) return undefined;
   const layout = resolveStatuslineDetailLayout(width, maxCount);
@@ -836,6 +902,7 @@ export function buildTmuxAttentionPills(
     .slice(0, layout.itemCount);
 
   const theme = resolveTheme(badgeStyle);
+  const labels = statuslineLabels(items, layout.pathMaxLength, labelOptions);
 
   if (jumpItems.length === 0) {
     return theme.empty;
@@ -843,7 +910,7 @@ export function buildTmuxAttentionPills(
 
   const segments = jumpItems.map((item, index) => {
     const agent = agentShortName(item.agentName);
-    const path = compactStatuslineDirLabel(item.cwd, layout.pathMaxLength);
+    const path = labels.get(item.pid) ?? compactStatuslineDirLabel(item.cwd, layout.pathMaxLength);
     const time = formatElapsedCompact(item.lastActivityAt ?? item.lastResponseAt);
     const label =
       item.kind === "permission"

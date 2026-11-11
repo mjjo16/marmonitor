@@ -129,6 +129,22 @@ describe("config path helpers", () => {
 });
 
 describe("loadConfig", () => {
+  it("defaults statusline labels to auto and accepts only supported modes", async () => {
+    assert.equal(getDefaults().display.statuslineLabel, "auto");
+    const dir = await mkdtemp(join(tmpdir(), "marmonitor-label-config-"));
+    const path = join(dir, "settings.json");
+    try {
+      for (const mode of ["path", "tmux", "auto", "invalid", 12, null]) {
+        await writeFile(path, JSON.stringify({ display: { statuslineLabel: mode } }));
+        assert.equal(
+          (await loadConfig(path)).display.statuslineLabel,
+          ["path", "tmux", "auto"].includes(mode) ? mode : "auto",
+        );
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
   it("returns defaults when config file does not exist", async () => {
     const config = await loadConfig("/nonexistent/path/settings.json");
     assert.equal(config.status.activeCpuThreshold, 0.5);

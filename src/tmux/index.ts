@@ -14,11 +14,12 @@ export interface TmuxPane {
   paneIndex: number;
   panePid: number;
   cwd: string;
+  paneId?: string;
 }
 
 export interface TmuxJumpTarget {
   pane: TmuxPane;
-  match: "pid-tree" | "cwd";
+  match: "pid-tree" | "tty" | "cwd";
 }
 
 export interface TmuxJumpResult {
@@ -26,7 +27,7 @@ export interface TmuxJumpResult {
   executed: boolean;
   insideTmux: boolean;
   pid: number;
-  match?: "pid-tree" | "cwd";
+  match?: "pid-tree" | "tty" | "cwd";
   target?: string;
   sessionName?: string;
   cwd?: string;
@@ -39,7 +40,7 @@ export function parseTmuxPanes(raw: string): TmuxPane[] {
     .map((line) => line.trim())
     .filter(Boolean)
     .flatMap((line) => {
-      const [target, panePidRaw, cwd] = line.split("\t");
+      const [target, panePidRaw, cwd, paneId] = line.split("\t");
       if (!target || !panePidRaw || !cwd) return [];
       const [sessionName, coords] = target.split(":");
       if (!sessionName || !coords) return [];
@@ -52,6 +53,7 @@ export function parseTmuxPanes(raw: string): TmuxPane[] {
         paneIndex: Number.parseInt(paneIndexRaw, 10),
         panePid: Number.parseInt(panePidRaw, 10),
         cwd,
+        ...(paneId && /^%\d+$/.test(paneId) ? { paneId } : {}),
       } satisfies TmuxPane;
       return Number.isFinite(pane.panePid) ? [pane] : [];
     })
@@ -100,15 +102,29 @@ export function selectTmuxPaneForAgent(
   agent: Pick<AgentSession, "pid" | "cwd">,
   panes: TmuxPane[],
   childMap: Map<number, number[]>,
+  ttys: ReadonlyMap<number, string> = new Map(),
+  allowCwdFallback = true,
 ): TmuxJumpTarget | undefined {
-  const treeMatch = panes.find((pane) => isPidInTree(pane.panePid, agent.pid, childMap));
-  if (treeMatch) {
-    return { pane: treeMatch, match: "pid-tree" };
+  // Linked windows can expose the same physical pane through multiple paths.
+  const uniquePanes = [
+    ...new Map(panes.map((pane) => [pane.paneId ?? pane.panePid, pane])).values(),
+  ];
+  const treeMatches = uniquePanes.filter((pane) => isPidInTree(pane.panePid, agent.pid, childMap));
+  if (treeMatches.length === 1) {
+    return { pane: treeMatches[0], match: "pid-tree" };
+  }
+  if (treeMatches.length > 1) return undefined;
+
+  const tty = ttys.get(agent.pid);
+  if (tty && /^\/dev\/(?:tty[^/]*|pts\/\d+|pty[^/]*)$/.test(tty)) {
+    const ttyMatches = uniquePanes.filter((pane) => ttys.get(pane.panePid) === tty);
+    if (ttyMatches.length === 1) return { pane: ttyMatches[0], match: "tty" };
+    if (ttyMatches.length > 1) return undefined;
   }
 
-  const cwdMatch = panes.find((pane) => pane.cwd === agent.cwd);
-  if (cwdMatch) {
-    return { pane: cwdMatch, match: "cwd" };
+  const cwdMatches = allowCwdFallback ? uniquePanes.filter((pane) => pane.cwd === agent.cwd) : [];
+  if (cwdMatches.length === 1) {
+    return { pane: cwdMatches[0], match: "cwd" };
   }
 
   return undefined;
@@ -120,7 +136,7 @@ export async function listTmuxPanes(): Promise<TmuxPane[]> {
       "list-panes",
       "-a",
       "-F",
-      "#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_path}",
+      "#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}\t#{pane_current_path}\t#{pane_id}",
     ]);
     return parseTmuxPanes(stdout);
   } catch {
@@ -239,12 +255,38 @@ export async function findActiveAgentPid(
 export async function resolveTmuxJumpTarget(
   agent: Pick<AgentSession, "pid" | "cwd">,
 ): Promise<TmuxJumpTarget | undefined> {
+  return (await resolveAgentTmuxTargets([agent], true)).get(agent.pid);
+}
+
+/** Resolve all labels in one batch. Display defaults to proven process/TTY
+ * ownership; jump preserves only an unambiguous cwd fallback. */
+export async function resolveAgentTmuxTargets(
+  agents: Array<Pick<AgentSession, "pid" | "cwd">>,
+  allowCwdFallback = false,
+): Promise<Map<number, TmuxJumpTarget>> {
+  const targets = new Map<number, TmuxJumpTarget>();
+  if (agents.length === 0) return targets;
   try {
-    const [panes, childMap] = await Promise.all([listTmuxPanes(), getProcessTree()]);
-    return selectTmuxPaneForAgent(agent, panes, childMap);
+    const [panes, tree] = await Promise.all([listTmuxPanes(), getProcessTree()]);
+    if (panes.length === 0) return targets;
+    for (const agent of agents) {
+      const target = selectTmuxPaneForAgent(agent, panes, tree, new Map(), false);
+      if (target) targets.set(agent.pid, target);
+    }
+    const unresolved = agents.filter((agent) => !targets.has(agent.pid));
+    if (unresolved.length > 0) {
+      const ttys = await getProcessTtys([
+        ...new Set([...unresolved.map((a) => a.pid), ...panes.map((p) => p.panePid)]),
+      ]);
+      for (const agent of unresolved) {
+        const target = selectTmuxPaneForAgent(agent, panes, tree, ttys, allowCwdFallback);
+        if (target) targets.set(agent.pid, target);
+      }
+    }
   } catch {
-    return undefined;
+    // Location is optional: keep the running CLI and fall back to PID labels.
   }
+  return targets;
 }
 
 export async function captureTmuxPaneOutput(
@@ -256,7 +298,7 @@ export async function captureTmuxPaneOutput(
       "capture-pane",
       "-p",
       "-t",
-      target.pane.target,
+      target.pane.paneId ?? target.pane.target,
       "-S",
       `-${lines}`,
     ]);

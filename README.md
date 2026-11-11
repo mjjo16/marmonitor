@@ -268,6 +268,8 @@ All settings are customizable via `@marmonitor-*` options. See the [plugin READM
 
 ### Badge styles
 
+Set `display.statuslineLabel` to `auto` (default), `path`, or `tmux`. Auto keeps unique path labels short and appends verified coordinates such as `@local:2.3` when paths or shortened names collide. If a duplicate session has no verified pane, or its location is too long for a narrow layout, a PID suffix keeps it distinct. Click targets remain PID-based.
+
 tmux badges and terminal text output can share one style via `integration.tmux.badgeStyle`.
 
 - `basic` — default colored pills
@@ -324,7 +326,8 @@ marmonitor settings-init --stdout
 {
   "display": {
     "attentionLimit": 10,
-    "statuslineAttentionLimit": 5
+    "statuslineAttentionLimit": 5,
+    "statuslineLabel": "auto"
   },
   "status": {
     "stalledAfterMin": 20,

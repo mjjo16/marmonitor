@@ -35,6 +35,7 @@ export interface MarmonitorConfig {
     sortBy: "cwd" | "agent" | "status" | "pid";
     attentionLimit: number;
     statuslineAttentionLimit: number;
+    statuslineLabel: "path" | "tmux" | "auto";
   };
   agents: Record<
     string,
@@ -147,6 +148,7 @@ const DEFAULTS: MarmonitorConfig = {
     sortBy: "cwd",
     attentionLimit: 10,
     statuslineAttentionLimit: 5,
+    statuslineLabel: "auto",
   },
   agents: {
     "Claude Code": { processNames: ["claude"] },
@@ -255,10 +257,14 @@ export async function loadConfig(customPath?: string): Promise<MarmonitorConfig>
     const raw = await readFile(configPath, "utf-8");
     const userConfig = JSON.parse(raw);
     if (!isJsonObject(userConfig)) return cloneDefaults();
-    return deepMerge(
+    const merged = deepMerge(
       cloneDefaults() as unknown as JsonObject,
       userConfig,
     ) as unknown as MarmonitorConfig;
+    if (merged.display && !["path", "tmux", "auto"].includes(merged.display.statuslineLabel)) {
+      merged.display.statuslineLabel = "auto";
+    }
+    return merged;
   } catch {
     // Malformed or unreadable config — use defaults silently
     return cloneDefaults();

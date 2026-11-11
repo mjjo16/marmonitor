@@ -2,9 +2,11 @@ import chalk from "chalk";
 import * as si from "systeminformation";
 import { partitionSessions } from "../sessions.js";
 import type { TmuxJumpResult } from "../tmux/index.js";
+import { resolveAgentTmuxTargets } from "../tmux/index.js";
 import type {
   AgentSession,
   SessionPhase,
+  StatuslineLabelMode,
   SystemInfo,
   TokenUsage,
   WorkerProcess,
@@ -19,8 +21,10 @@ import {
   buildTmuxAttentionPills,
   buildTmuxBadgeBar,
   compactDirLabel,
+  compactStatuslineDirLabel,
   formatElapsed,
   formatTokens,
+  resolveStatuslineDetailLayout,
   serializeWeztermPills,
   shortenPath,
 } from "./utils.js";
@@ -681,6 +685,7 @@ export async function renderStatusline(
   badgeStyle: BadgeStyle = "basic",
   hasJumpAnchor = false,
   activeAgentPid?: number,
+  statuslineLabel: StatuslineLabelMode = "auto",
 ): Promise<string> {
   const { running, matched: alive, unmatched } = partitionSessions(agents);
 
@@ -716,12 +721,22 @@ export async function renderStatusline(
   };
 
   if (format === "tmux-badges") {
+    const pathMaxLength = resolveStatuslineDetailLayout(width, attentionLimit).pathMaxLength;
+    const paths = running.map((agent) => compactStatuslineDirLabel(agent.cwd, pathMaxLength));
+    const needsLocations =
+      statuslineLabel === "tmux" ||
+      (statuslineLabel === "auto" && new Set(paths).size < paths.length);
     const focusText = buildTmuxAttentionPills(
       buildJumpAttentionItems(agents),
       attentionLimit,
       width,
       badgeStyle,
       activeAgentPid,
+      {
+        mode: statuslineLabel,
+        collisionItems: running,
+        tmuxTargets: needsLocations ? await resolveAgentTmuxTargets(running) : undefined,
+      },
     );
     return buildTmuxBadgeBar(snapshot, focusText, badgeStyle, hasJumpAnchor);
   }
