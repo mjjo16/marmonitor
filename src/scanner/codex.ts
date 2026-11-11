@@ -419,10 +419,44 @@ export function selectCodexSessionForProcess(pick: CodexSessionPick): CodexSessi
   const available = sessions.filter(
     (session) => !claimedSessionIds.has(session.id) && !pick.argvReservedSessionIds.has(session.id),
   );
-  return (
-    pick.resolveBinding?.(available) ??
-    matchCodexSession(pick.cwd, pick.processStartedAt, available)
+  const bound = pick.resolveBinding?.(available);
+  if (bound) {
+    const bornWith = sessionBornWithProcess(available, pick.cwd, pick.processStartedAt);
+    // A persisted binding can be an old heuristic guess. If this process never
+    // wrote the bound file but did create a rollout at startup, the rollout wins
+    // and the caller's upsert repairs the registry record.
+    if (
+      bornWith &&
+      bornWith.id !== bound.id &&
+      pick.processStartedAt !== undefined &&
+      (bound.lastActivityAt ?? bound.timestamp) < pick.processStartedAt - CODEX_START_SLACK_SEC
+    ) {
+      return bornWith;
+    }
+    return bound;
+  }
+  return matchCodexSession(pick.cwd, pick.processStartedAt, available);
+}
+
+const CODEX_START_SLACK_SEC = 5;
+/** Codex creates its rollout within seconds of process start. */
+const CODEX_ROLLOUT_BIRTH_WINDOW_SEC = 60;
+
+/** The one rollout in this cwd created right after the process started, if
+ * exactly one exists. Two processes starting together make it ambiguous. */
+function sessionBornWithProcess(
+  sessions: CodexSessionMeta[],
+  cwd: string,
+  processStartedAt: number | undefined,
+): CodexSessionMeta | undefined {
+  if (processStartedAt === undefined) return undefined;
+  const born = sessions.filter(
+    (session) =>
+      session.cwd === cwd &&
+      session.timestamp >= processStartedAt - CODEX_START_SLACK_SEC &&
+      session.timestamp <= processStartedAt + CODEX_ROLLOUT_BIRTH_WINDOW_SEC,
   );
+  return born.length === 1 ? born[0] : undefined;
 }
 
 /** Match a Codex process to a session by cwd + closest timestamp */
