@@ -35,8 +35,8 @@ bin/daemon.js  ──▶  src/scanner/daemon-entry.ts ─▶ runDaemonLoop()
                        │ light scan (default 2s)  : ps-list + pidusage + 캐시 enrich
                        │ heavy scan (30s)         : Claude/Codex/Gemini jsonl·sqlite 풀 파싱
                        │
-                       ├─ /tmp/marmonitor/daemon-snapshot.json   (statusline 소비자)
-                       ├─ /tmp/marmonitor/alerts-snapshot.json
+                       ├─ $TMPDIR/marmonitor/daemon-snapshot.json (statusline 소비자)
+                       ├─ $TMPDIR/marmonitor/alerts-snapshot.json
                        ├─ ~/.config/marmonitor/session-registry.json
                        ├─ ~/.config/marmonitor/codex-binding-registry.json
                        ├─ ~/.config/marmonitor/activity-log/YYYY-MM-DD.jsonl
@@ -48,7 +48,7 @@ bin/marmonitor.js ─▶ src/cli.ts ─▶ readDaemonSnapshot() ─▶ src/outpu
 핵심 불변식:
 - **싱글 데이몬**: `start`는 ps-list로 중복 체크 후 fork. `stop`은 SIGTERM → 2s wait → SIGKILL.
 - **fail-safe**: `ps`/`lsof`/`tmux`/file IO 모든 외부 호출은 try/catch + 캐시 쓰기 실패 무시. guard는 fail-open(`{"decision":"allow"}`).
-- **statusline TTL 캐시**: `/tmp/marmonitor/statusline-<format>-<limit>-<width>.txt`. `tmux-badges`는 active panePid를 첫 줄에 박아 active 창이 바뀌면 즉시 invalidate.
+- **statusline TTL 캐시**: `$TMPDIR/marmonitor/statusline-<format>-<limit>-<width>.txt`. `tmux-badges`는 active panePid를 첫 줄에 박아 active 창이 바뀌면 즉시 invalidate.
 
 ## Code Layout
 
@@ -152,7 +152,10 @@ marmonitor setup tmux | update-integration | uninstall-integration
 ~/.config/marmonitor/settings.json     XDG 우선 (legacy: ~/.marmonitor.json)
 ~/.config/marmonitor/{session-registry,codex-binding-registry,alerts.log}
 ~/.config/marmonitor/activity-log/YYYY-MM-DD.jsonl
-/tmp/marmonitor/{daemon.pid,daemon-snapshot.json,alerts-snapshot.json,statusline-*.txt,jump-anchors.json}
+$TMPDIR/marmonitor/{daemon.pid,daemon-snapshot.json,alerts-snapshot.json,statusline-*.txt,jump-anchors.json}
+  ^ os.tmpdir() 기준. macOS는 /var/folders/.../T/marmonitor 이며 /tmp/marmonitor 가 아니다.
+  데몬 생존 확인은 daemon-snapshot.json mtime 으로 한다(light interval 2s). 데몬은
+  프로세스 타이틀을 marmonitor 로 바꾸므로 pgrep -f daemon.js 로는 잡히지 않는다.
 
 MARMONITOR_CLAUDE_HOME / MARMONITOR_CODEX_HOME    경로 루트 오버라이드
 MARMONITOR_CLAUDE_PROJECTS / _CLAUDE_SESSIONS / _CODEX_SESSIONS    PATH 형식 다중 경로

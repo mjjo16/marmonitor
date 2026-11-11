@@ -24,6 +24,15 @@ export const CLAUDE_MATCH_GAP_SEC = 5;
 export const CLAUDE_PHASE_RECENT_LINES = 50;
 export const CODEX_PHASE_RECENT_LINES = 30;
 export const RECENT_ACTIVITY_ACTIVE_SEC = 180;
+
+/**
+ * How long a Codex "looks busy" inference (CPU burst / stdout phase) may stand
+ * in for observed activity. #090 added the inference so `last activity` would
+ * not snap back to the old rollout mtime the moment a tool finished; #113 is
+ * the same value never expiring, leaving a session that went quiet ten days
+ * ago looking recent forever. Real work keeps re-stamping within this window.
+ */
+export const CODEX_INFERRED_BUSY_TTL_SEC = RECENT_ACTIVITY_ACTIVE_SEC;
 export const STATUS_HYSTERESIS_SEC = 30;
 
 // ─── Cache Entry Types ─────────────────────────────────────────────

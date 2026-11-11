@@ -360,6 +360,71 @@ export async function indexCodexSessions(
   return sessions;
 }
 
+/** `codex resume <uuid>` — the thread the process explicitly reopened. */
+const CODEX_RESUME_ID_RE =
+  /\bresume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i;
+
+/** `--session-id <id>` — used by the ChatGPT desktop app's helper. */
+const CODEX_SESSION_ID_FLAG_RE = /--session[-_]id[=\s]+([0-9a-f][0-9a-f-]{7,})/i;
+
+/**
+ * Session id a Codex process names in its own command line.
+ *
+ * This is an identity, not a guess, and it outranks every heuristic. Matching
+ * by cwd and nearest start time gets this wrong in the ordinary case of a
+ * resumed thread: the process starts today while its session file is dated
+ * whenever the thread began, so a newer unrelated session in the same cwd wins
+ * the proximity sort and two processes end up on one session (#114).
+ */
+export function parseCodexSessionIdFromCmd(cmd: string | undefined): string | undefined {
+  if (!cmd) return undefined;
+  const match = CODEX_RESUME_ID_RE.exec(cmd) ?? CODEX_SESSION_ID_FLAG_RE.exec(cmd);
+  return match?.[1]?.toLowerCase();
+}
+
+export interface CodexSessionPick {
+  declaredSessionId: string | undefined;
+  sessions: CodexSessionMeta[];
+  claimedSessionIds: ReadonlySet<string>;
+  argvReservedSessionIds: ReadonlySet<string>;
+  cwd: string;
+  processStartedAt: number | undefined;
+  resolveBinding?: (available: CodexSessionMeta[]) => CodexSessionMeta | undefined;
+}
+
+/**
+ * Which session a Codex process owns, in order of how much the answer is
+ * actually known (#114).
+ *
+ * Binding to the wrong session is worse than not binding at all: a misbound
+ * process reports another session's tokens and jumps to its pane. So each step
+ * refuses instead of falling through to a weaker guess once the strong answer
+ * is unavailable.
+ *
+ *   declared   the id in the process's own command line — an identity
+ *   binding    what this exact PID resolved to before, from the registry
+ *   heuristic  cwd + nearest start time, the only option left
+ *
+ * Sessions already claimed this cycle, and sessions another process declared,
+ * are removed from the pool before the two weaker steps run — otherwise a guess
+ * can steal a session that someone else names outright.
+ */
+export function selectCodexSessionForProcess(pick: CodexSessionPick): CodexSessionMeta | undefined {
+  const { declaredSessionId, sessions, claimedSessionIds } = pick;
+  if (declaredSessionId) {
+    if (claimedSessionIds.has(declaredSessionId)) return undefined;
+    return sessions.find((session) => session.id === declaredSessionId);
+  }
+
+  const available = sessions.filter(
+    (session) => !claimedSessionIds.has(session.id) && !pick.argvReservedSessionIds.has(session.id),
+  );
+  return (
+    pick.resolveBinding?.(available) ??
+    matchCodexSession(pick.cwd, pick.processStartedAt, available)
+  );
+}
+
 /** Match a Codex process to a session by cwd + closest timestamp */
 export function matchCodexSession(
   processCwd: string,

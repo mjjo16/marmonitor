@@ -3,9 +3,10 @@
  * Maps sessionId → session history with PID changes and token accumulation.
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { AgentSession } from "../types.js";
+import { CODEX_INFERRED_BUSY_TTL_SEC } from "./cache.js";
 
 export interface SessionRegistryRecord {
   sessionId: string;
@@ -28,6 +29,17 @@ export interface SessionRegistryRecord {
 
 export interface SessionRegistryUpdate extends Partial<AgentSession> {
   jsonlPath?: string;
+}
+
+/**
+ * The activity time safe to write to disk: the observed one when the caller
+ * tracks it at all, otherwise whatever it reported. Callers that split the two
+ * always set `observedActivityAt`, even when it is undefined, so its presence —
+ * not its value — is what says "this caller separates observation from
+ * inference" (#113).
+ */
+function resolveObservedForPersist(agent: SessionRegistryUpdate): number | undefined {
+  return "observedActivityAt" in agent ? agent.observedActivityAt : agent.lastActivityAt;
 }
 
 export function updateRegistry(
@@ -64,8 +76,15 @@ export function updateRegistry(
         existing.totalTokens.output = agent.tokenUsage.outputTokens ?? 0;
         existing.totalTokens.cache = agent.tokenUsage.cacheReadTokens ?? 0;
       }
-      if (agent.lastActivityAt) {
-        existing.lastActivityAt = Math.max(existing.lastActivityAt ?? 0, agent.lastActivityAt);
+      // #113: persist observed activity only. lastActivityAt may carry a
+      // fresh CPU/phase inference, and this Math.max is monotonic with no
+      // expiry — one inferred stamp on disk would outlive the session forever.
+      // The fallback keys on the field being absent, not on it being unset: a
+      // session with an inference but no observation reports the field as
+      // undefined, and `??` would have written the inference instead.
+      const observedAt = resolveObservedForPersist(agent);
+      if (observedAt) {
+        existing.lastActivityAt = Math.max(existing.lastActivityAt ?? 0, observedAt);
       }
       if (agent.model) existing.model = agent.model;
       if (agent.cwd) existing.cwd = agent.cwd;
@@ -87,7 +106,7 @@ export function updateRegistry(
           output: agent.tokenUsage?.outputTokens ?? 0,
           cache: agent.tokenUsage?.cacheReadTokens ?? 0,
         },
-        lastActivityAt: agent.lastActivityAt,
+        lastActivityAt: resolveObservedForPersist(agent),
         model: agent.model,
       });
     }
@@ -111,6 +130,68 @@ export function pruneRegistry(
     }
   }
   return pruned;
+}
+
+/**
+ * Newest `jsonlPath` recorded for a session, ignoring path-less history entries.
+ */
+function findLatestJsonlPath(record: SessionRegistryRecord): string | undefined {
+  const history = record.history;
+  if (!history) return undefined;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const jsonlPath = history[i]?.jsonlPath;
+    if (jsonlPath) return jsonlPath;
+  }
+  return undefined;
+}
+
+/** Slack allowed before a record counts as drifted from its file. */
+const CLAMP_TOLERANCE_SEC = CODEX_INFERRED_BUSY_TTL_SEC;
+
+/**
+ * Repair activity times that exceed what the session files can justify (#113).
+ *
+ * A record's `lastActivityAt` can never legitimately be newer than the mtime of
+ * the jsonl it was derived from: the file is written when the event happens, so
+ * the timestamp inside it is always at or before the write. Anything later came
+ * from an inference that used to be persisted without an expiry, which left
+ * long-quiet sessions reporting "recent" indefinitely — for ten days in the
+ * case that surfaced this.
+ *
+ * Two things keep this from firing on legitimate drift. Times are compared
+ * against the mtime rounded *up*, because stored stamps are fractional
+ * (`mtimeMs / 1000`) and a floor comparison would clamp nearly every record by
+ * under a second on every load. And a tolerance is allowed on top, because a
+ * Codex time can come from the SQLite `updated_at` that `mergeCodexIndexedSessions`
+ * maxes with the rollout mtime, so it may legitimately lead the file by a little.
+ * The drift this repairs is hours to days, so the tolerance costs nothing.
+ *
+ * Records whose file is gone are left alone; there is nothing to check against.
+ */
+export async function clampRegistryActivityToObserved(
+  registry: Map<string, SessionRegistryRecord>,
+): Promise<number> {
+  let repaired = 0;
+  for (const record of registry.values()) {
+    if (record.lastActivityAt === undefined) continue;
+    // Walk back to the newest entry that actually carries a path. Only the
+    // heavy-scan writer records one, so the final entry is routinely a
+    // path-less light-scan append — anchoring on `at(-1)` alone skipped
+    // exactly the long-lived records that drift furthest from their files.
+    const jsonlPath = findLatestJsonlPath(record);
+    if (!jsonlPath) continue;
+    try {
+      const fileStat = await stat(jsonlPath);
+      const observedAt = Math.ceil(fileStat.mtimeMs / 1000);
+      if (record.lastActivityAt > observedAt + CLAMP_TOLERANCE_SEC) {
+        record.lastActivityAt = observedAt;
+        repaired++;
+      }
+    } catch {
+      // file moved or removed — nothing to validate against
+    }
+  }
+  return repaired;
 }
 
 export async function saveRegistryToFile(
@@ -137,6 +218,7 @@ export async function loadRegistryFromFile(
       for (const [key, value] of Object.entries(data)) {
         registry.set(key, value as SessionRegistryRecord);
       }
+      await clampRegistryActivityToObserved(registry);
     }
   } catch {
     // missing or malformed file — start with empty registry
